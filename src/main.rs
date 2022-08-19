@@ -201,7 +201,7 @@ mod executor {
 
     pub trait Executor {
         /// Apply kernel operation to all possible indices of `res` and populate it with the results.
-        fn run<K: Kernel>(kernel: K, data: &Arr2D, res: &mut Arr2D);
+        fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D);
     }
 
     /// Simple serial (single-threaded) executor.
