@@ -9,8 +9,8 @@ fn main() {
     let size = Size2D(1000, 1000);
 
     let mut d_in = Arr2D::full(0f64, size);
-    d_in.size().into_iter().for_each(|ind| {
-        if (ind[0] - 500).pow(2) < 10_000 && (ind[1] - 500).pow(2) < 10_000 {
+    d_in.size().iter().for_each(|ind| {
+        if ((ind[0] as i64) - 499).pow(2) < 10_000 && ((ind[1] as i64) - 499).pow(2) < 10_000 {
             d_in[ind] = 1f64;
         } else {
             d_in[ind] = 0f64;
@@ -27,85 +27,68 @@ fn main() {
         SerialExecutor::run(Blur, &d_out, &mut d_in);
     }
     println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
-    (0..1000).for_each(|i| print! {"{},", d_in[[500, i]]});
+    // (0..1000).for_each(|i| print! {"{:#.2e},", d_in[[500, i]]});
 }
 
 mod data_type {
-    use std::iter::{IntoIterator, Iterator};
-    use std::ops::{Index, IndexMut};
+    use std::iter::IntoIterator;
+    use std::ops::{Index, IndexMut, Range};
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub struct Size2D(pub usize, pub usize);
     pub type Ix2 = [usize; 2];
     pub type Item = f64;
+    type Range1D = Range<usize>;
+
+    #[derive(Clone, Debug)]
+    pub struct Range2D(Range1D, Range1D);
+
+    impl From<Size2D> for Range2D {
+        #[inline]
+        fn from(size: Size2D) -> Self {
+            Range2D(0..size.0, 0..size.1)
+        }
+    }
+
+    impl Iterator for Range2D {
+        type Item = Ix2;
+
+        #[inline]
+        fn next(&mut self) -> Option<Self::Item> {
+            let i = match self.1.next() {
+                Some(i) => i,
+                None => {
+                    self.0.next();
+                    self.1.start = 0;
+                    self.1.next().ok_or(()).unwrap()
+                }
+            };
+            if self.0.start < self.0.end {
+                Some([self.0.start, i])
+            } else {
+                None
+            }
+        }
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let hint = self.0.size_hint().0.checked_mul(self.1.size_hint().0);
+            (hint.unwrap_or(usize::MAX), hint)
+        }
+    }
 
     impl Size2D {
-        pub fn into_indexer(self, halo_y: usize, halo_x: usize) -> Indexer2D {
-            Indexer2D {
-                start_x: halo_x,
-                end_x: self.1 - halo_x,
-                start_y: halo_y,
-                end_y: self.0 - halo_y,
-            }
+        pub fn iter(self) -> Range2D {
+            self.into_iter()
         }
     }
 
     impl IntoIterator for Size2D {
         type Item = Ix2;
-        type IntoIter = IndexIterator2D;
+        type IntoIter = Range2D;
 
         fn into_iter(self) -> Self::IntoIter {
-            self.into_indexer(0, 0).into_iter()
-        }
-    }
-
-    pub struct Indexer2D {
-        start_x: usize,
-        end_x: usize,
-        start_y: usize,
-        end_y: usize,
-    }
-
-    impl IntoIterator for Indexer2D {
-        type Item = Ix2;
-        type IntoIter = IndexIterator2D;
-
-        fn into_iter(self) -> Self::IntoIter {
-            let (start_x, start_y) = (self.start_x, self.start_y);
-            IndexIterator2D {
-                indexer: self,
-                i: start_x,
-                j: start_y,
-            }
-        }
-    }
-
-    pub struct IndexIterator2D {
-        indexer: Indexer2D,
-        i: usize,
-        j: usize,
-    }
-
-    impl Iterator for IndexIterator2D {
-        type Item = Ix2;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            let ret = {
-                if self.j < self.indexer.end_y {
-                    Some([self.j, self.i])
-                } else {
-                    return None;
-                }
-            };
-
-            self.i += 1;
-
-            if self.i >= self.indexer.end_x {
-                self.i = self.indexer.start_x;
-                self.j += 1;
-            }
-
-            ret
+            Range2D::from(self)
         }
     }
 
@@ -144,6 +127,18 @@ mod data_type {
             &mut self.data[self.size.1 * index[0] + index[1]]
         }
     }
+
+    #[cfg(test)]
+    mod test {
+        use super::{Ix2, Size2D};
+
+        #[test]
+        fn range2d_iterates_over_all_indices() {
+            let s = Size2D(2, 3);
+            let res: Vec<Ix2> = s.iter().collect();
+            assert_eq!(res, vec![[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]]);
+        }
+    }
 }
 
 mod kernel {
@@ -167,11 +162,13 @@ mod kernel {
     ];
 
     impl Blur {
-        fn shift_i() -> usize {
+        #[inline]
+        const fn shift_i() -> usize {
             1
         }
 
-        fn shift_j() -> usize {
+        #[inline]
+        const fn shift_j() -> usize {
             1
         }
     }
@@ -189,6 +186,7 @@ mod kernel {
             sum
         }
 
+        #[inline]
         fn size() -> Size2D {
             Size2D(3, 3)
         }
@@ -210,11 +208,16 @@ mod executor {
     impl Executor for SerialExecutor {
         fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
             let kernel_size = K::size();
-            let index = data
-                .size()
+            let size = res.size();
+            let index = size
+                .iter()
                 // assume symmetric kernel
-                .into_indexer(kernel_size.0 / 2, kernel_size.1 / 2)
-                .into_iter();
+                .filter(|ind| {
+                    ind[0] >= kernel_size.0
+                        && ind[0] < size.0 - kernel_size.0
+                        && ind[1] >= kernel_size.1
+                        && ind[1] < size.1 - kernel_size.1
+                });
             index.for_each(|ind| {
                 res[ind] = K::eval(data, ind);
             })
