@@ -52,6 +52,7 @@ mod data_type {
     impl Iterator for Range2D {
         type Item = Ix2;
 
+        /// Produces indices in row-major ordering
         #[inline]
         fn next(&mut self) -> Option<Self::Item> {
             let i = match self.1.next() {
@@ -86,7 +87,7 @@ mod data_type {
 
         /// Conversion from `Ix2` into linear index.
         ///
-        /// 2D indexing is assumed to be row-major, i.e. last index vary fastest.
+        /// 2D indexing is row-major, i.e. last index vary fastest.
         #[inline]
         pub fn index_into_usize(&self, i: Ix2) -> usize {
             self.1 * i[0] + i[1]
@@ -94,7 +95,7 @@ mod data_type {
 
         /// Conversion from linear index into `Ix2`.
         ///
-        /// 2D indexing is assumed to be row-major, i.e. last index vary fastest.
+        /// 2D indexing is row-major, i.e. last index vary fastest.
         #[inline]
         pub fn usize_into_index(&self, i: usize) -> Ix2 {
             [i / self.1, i % self.1]
