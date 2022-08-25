@@ -1,15 +1,15 @@
 use crate::{
-    data_type::{Arr2D, Size2D},
+    data_type::{Arr2D, Shape2D},
     executor::{Executor, SerialExecutor},
     kernel::Blur,
 };
 use std::time::Instant;
 
 fn main() {
-    let size = Size2D(1000, 1000);
+    let shape = Shape2D(1000, 1000);
 
-    let mut d_in = Arr2D::full(0f64, size);
-    d_in.size().iter().for_each(|ind| {
+    let mut d_in = Arr2D::full(0f64, shape);
+    d_in.shape().iter().for_each(|ind| {
         if ((ind[0] as i64) - 499).pow(2) < 10_000 && ((ind[1] as i64) - 499).pow(2) < 10_000 {
             d_in[ind] = 1f64;
         } else {
@@ -17,7 +17,7 @@ fn main() {
         }
     });
 
-    let mut d_out = Arr2D::full(0f64, size);
+    let mut d_out = Arr2D::full(0f64, shape);
 
     let rep = 100;
 
@@ -42,10 +42,10 @@ mod data_type {
     #[derive(Clone, Debug)]
     pub struct Range2D(Range1D, Range1D);
 
-    impl From<Size2D> for Range2D {
+    impl From<Shape2D> for Range2D {
         #[inline]
-        fn from(size: Size2D) -> Self {
-            Range2D(0..size.0, 0..size.1)
+        fn from(shape: Shape2D) -> Self {
+            Range2D(0..shape.0, 0..shape.1)
         }
     }
 
@@ -78,9 +78,9 @@ mod data_type {
     }
 
     #[derive(Copy, Clone, Debug)]
-    pub struct Size2D(pub usize, pub usize);
+    pub struct Shape2D(pub usize, pub usize);
 
-    impl Size2D {
+    impl Shape2D {
         pub fn iter(self) -> Range2D {
             self.into_iter()
         }
@@ -102,7 +102,7 @@ mod data_type {
         }
     }
 
-    impl IntoIterator for Size2D {
+    impl IntoIterator for Shape2D {
         type Item = Ix2;
         type IntoIter = Range2D;
 
@@ -112,22 +112,23 @@ mod data_type {
     }
 
     pub struct Arr2D {
-        size: Size2D,
+        shape: Shape2D,
         // box slice because of stack size limitations
         data: Box<[Item]>,
     }
 
     impl Arr2D {
-        pub fn full(item: f64, size: Size2D) -> Self {
+        pub fn full(item: f64, shape: Shape2D) -> Self {
             Arr2D {
-                size,
-                data: vec![item; size.0 * size.1].into_boxed_slice(),
+                shape,
+                data: vec![item; shape.0 * shape.1].into_boxed_slice(),
             }
         }
 
+        /// Provide the shape of the Array.
         #[inline]
-        pub fn size(&self) -> Size2D {
-            self.size
+        pub fn shape(&self) -> Shape2D {
+            self.shape
         }
 
         #[inline]
@@ -146,7 +147,7 @@ mod data_type {
         // row major indexing
         #[inline]
         fn index(&self, index: Ix2) -> &Item {
-            &self[self.size.index_into_usize(index)]
+            &self[self.shape.index_into_usize(index)]
         }
     }
 
@@ -154,7 +155,7 @@ mod data_type {
         // row major indexing
         #[inline]
         fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
-            let index = self.size().index_into_usize(index);
+            let index = self.shape().index_into_usize(index);
             &mut self[index]
         }
     }
@@ -178,40 +179,44 @@ mod data_type {
     #[cfg(test)]
     mod test {
 
-        use super::{Arr2D, Ix2, Size2D};
+        use super::{Arr2D, Ix2, Shape2D};
 
         #[test]
         fn linear_to_tuple_index() {
-            let size = Size2D(2, 3);
-            let res: Vec<Ix2> = size
+            let shape = Shape2D(2, 3);
+            let res: Vec<Ix2> = shape
                 .iter()
                 .enumerate()
-                .map(|(i, _ind)| size.usize_into_index(i))
+                .map(|(i, _ind)| shape.usize_into_index(i))
                 .collect();
             assert_eq!(res, vec![[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2],])
         }
 
         #[test]
         fn tuple_index_to_linear() {
-            let size = Size2D(2, 3);
-            let res: Vec<usize> = size.iter().map(|ind| size.index_into_usize(ind)).collect();
-            let oracle: Vec<usize> = (0..(size.0 * size.1)).collect();
+            let shape = Shape2D(2, 3);
+            let res: Vec<usize> = shape
+                .iter()
+                .map(|ind| shape.index_into_usize(ind))
+                .collect();
+            let oracle: Vec<usize> = (0..(shape.0 * shape.1)).collect();
             assert_eq!(res, oracle)
         }
 
         #[test]
         fn range2d_iterates_over_all_indices() {
-            let s = Size2D(2, 3);
+            let s = Shape2D(2, 3);
             let res: Vec<Ix2> = s.iter().collect();
             assert_eq!(res, vec![[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]]);
         }
 
         #[test]
         fn arr2d_iter_mut_with_index_in_bounds() {
-            let size = Size2D(500, 100);
-            let mut data = Arr2D::full(1f64, size);
-            let data2 = Arr2D::full(2f64, size);
-            size.iter()
+            let shape = Shape2D(500, 100);
+            let mut data = Arr2D::full(1f64, shape);
+            let data2 = Arr2D::full(2f64, shape);
+            shape
+                .iter()
                 .zip(data.iter_mut())
                 .for_each(|(ind, out)| *out = data2[ind]);
             assert!(data.iter().all(|d| *d == 2.0));
@@ -220,7 +225,7 @@ mod data_type {
 }
 
 mod kernel {
-    use crate::data_type::{Arr2D, Item, Ix2, Size2D};
+    use crate::data_type::{Arr2D, Item, Ix2, Shape2D};
 
     /// Trait for kernel operations.
     pub trait Kernel {
@@ -228,7 +233,7 @@ mod kernel {
         fn eval(data: &Arr2D, idx: Ix2) -> Item;
 
         /// Return size of the kernel
-        fn size() -> Size2D;
+        fn shape() -> Shape2D;
     }
 
     pub struct Blur;
@@ -239,7 +244,7 @@ mod kernel {
         [1.0 / 16.0, 2.0 / 16.0, 1.0 / 16.0],
     ];
 
-    const KERNEL_GAUSS_SIZE: Size2D = Size2D(3, 3);
+    const KERNEL_GAUSS_SHAPE: Shape2D = Shape2D(3, 3);
 
     impl Blur {
         #[inline]
@@ -253,17 +258,17 @@ mod kernel {
         }
 
         #[inline]
-        fn not_process(idx: Ix2, shape: Size2D) -> bool {
-            idx[0] < Self::size().0
-                || idx[0] >= shape.0 - Self::size().0
-                || idx[1] < Self::size().1
-                || idx[1] >= shape.1 - Self::size().1
+        fn not_process(idx: Ix2, shape: Shape2D) -> bool {
+            idx[0] < Self::shape().0
+                || idx[0] >= shape.0 - Self::shape().0
+                || idx[1] < Self::shape().1
+                || idx[1] >= shape.1 - Self::shape().1
         }
     }
 
     impl Kernel for Blur {
         fn eval(data: &Arr2D, idx: Ix2) -> Item {
-            if Self::not_process(idx, data.size()) {
+            if Self::not_process(idx, data.shape()) {
                 return data[idx];
             }
 
@@ -279,8 +284,8 @@ mod kernel {
         }
 
         #[inline]
-        fn size() -> Size2D {
-            KERNEL_GAUSS_SIZE
+        fn shape() -> Shape2D {
+            KERNEL_GAUSS_SHAPE
         }
     }
 }
@@ -299,8 +304,9 @@ mod executor {
 
     impl Executor for SerialExecutor {
         fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
-            let size = res.size();
-            size.iter()
+            let shape = res.shape();
+            shape
+                .iter()
                 .zip(res.iter_mut())
                 .for_each(|(idx, d)| *d = K::eval(data, idx));
         }
