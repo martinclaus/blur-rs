@@ -238,6 +238,8 @@ mod kernel {
         [1.0 / 16.0, 2.0 / 16.0, 1.0 / 16.0],
     ];
 
+    const KERNEL_GAUSS_SIZE: Size2D = Size2D(3, 3);
+
     impl Blur {
         #[inline]
         const fn shift_i() -> usize {
@@ -248,10 +250,22 @@ mod kernel {
         const fn shift_j() -> usize {
             1
         }
+
+        #[inline]
+        fn not_process(idx: Ix2, shape: Size2D) -> bool {
+            idx[0] < Self::size().0
+                || idx[0] >= shape.0 - Self::size().0
+                || idx[1] < Self::size().1
+                || idx[1] >= shape.1 - Self::size().1
+        }
     }
 
     impl Kernel for Blur {
         fn eval(data: &Arr2D, idx: Ix2) -> Item {
+            if Self::not_process(idx, data.size()) {
+                return data[idx];
+            }
+
             let mut sum: Item = 0.0;
 
             KERNEL_GAUSS.iter().enumerate().for_each(|(j, row)| {
@@ -265,7 +279,7 @@ mod kernel {
 
         #[inline]
         fn size() -> Size2D {
-            Size2D(3, 3)
+            KERNEL_GAUSS_SIZE
         }
     }
 }
@@ -284,16 +298,9 @@ mod executor {
 
     impl Executor for SerialExecutor {
         fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
-            let kernel_size = K::size();
             let size = res.size();
             size.iter()
                 .zip(res.iter_mut())
-                .filter(|(idx, _)| {
-                    idx[0] >= kernel_size.0
-                        && idx[0] < size.0 - kernel_size.0
-                        && idx[1] >= kernel_size.1
-                        && idx[1] < size.1 - kernel_size.1
-                })
                 .for_each(|(idx, d)| *d = K::eval(data, idx));
         }
     }
