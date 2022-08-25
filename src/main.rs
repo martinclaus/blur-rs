@@ -232,7 +232,7 @@ mod kernel {
         /// Evaluate kernel operation for given index idx.
         fn eval(data: &Arr2D, idx: Ix2) -> Item;
 
-        /// Return size of the kernel
+        /// Return shape of the kernel
         fn shape() -> Shape2D;
     }
 
