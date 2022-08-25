@@ -251,10 +251,16 @@ mod kernel {
 
     pub struct Blur;
 
-    const KERNEL_GAUSS: [[Item; 3]; 3] = [
-        [1.0 / 16.0, 2.0 / 16.0, 1.0 / 16.0],
-        [2.0 / 16.0, 4.0 / 16.0, 2.0 / 16.0],
-        [1.0 / 16.0, 2.0 / 16.0, 1.0 / 16.0],
+    const KERNEL_GAUSS: [Item; 9] = [
+        1.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
+        2.0 / 16.0,
+        4.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
+        2.0 / 16.0,
+        1.0 / 16.0,
     ];
 
     const KERNEL_GAUSS_SHAPE: Shape2D = Shape2D(3, 3);
@@ -277,11 +283,13 @@ mod kernel {
 
             let mut sum: Item = 0.0;
 
-            KERNEL_GAUSS.iter().enumerate().for_each(|(j, row)| {
-                row.iter()
-                    .enumerate()
-                    .for_each(|(i, elem)| sum += elem * data[Self::map_index([j, i], idx)]);
-            });
+            // convolve with kernel
+            Self::shape()
+                .iter()
+                .zip(KERNEL_GAUSS.iter())
+                .for_each(|(k_idx, elem)| {
+                    sum += elem * data[Self::map_index(k_idx, idx)];
+                });
 
             sum
         }
