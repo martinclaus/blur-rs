@@ -240,6 +240,7 @@ mod kernel {
         /// value at index `d_idx`.
         ///
         /// # Examples
+        /// `Blur` is a centered 3x3 kernel.
         ///
         /// ```
         /// assert_eq!(Blur::map_index([0, 0], [4, 5]), [3, 4]);
