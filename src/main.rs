@@ -234,6 +234,18 @@ mod kernel {
 
         /// Return shape of the kernel
         fn shape() -> Shape2D;
+
+        /// Maps `k_idx`, the index of the kernel item, to an index
+        /// of the respective data array, if the kernel shall produce a
+        /// value at index `d_idx`.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// assert_eq!(Blur::map_index([0, 0], [4, 5]), [3, 4]);
+        /// assert_eq!(Blur::map_index([2, 1], [4, 5]), [5, 5]);
+        /// ```
+        fn map_index(k_idx: Ix2, d_idx: Ix2) -> Ix2;
     }
 
     pub struct Blur;
@@ -247,16 +259,6 @@ mod kernel {
     const KERNEL_GAUSS_SHAPE: Shape2D = Shape2D(3, 3);
 
     impl Blur {
-        #[inline]
-        const fn shift_i() -> usize {
-            1
-        }
-
-        #[inline]
-        const fn shift_j() -> usize {
-            1
-        }
-
         #[inline]
         fn not_process(idx: Ix2, shape: Shape2D) -> bool {
             idx[0] < Self::shape().0
@@ -275,9 +277,9 @@ mod kernel {
             let mut sum: Item = 0.0;
 
             KERNEL_GAUSS.iter().enumerate().for_each(|(j, row)| {
-                row.iter().enumerate().for_each(|(i, elem)| {
-                    sum += elem * data[[idx[0] + j - Self::shift_j(), idx[1] + i - Self::shift_i()]]
-                });
+                row.iter()
+                    .enumerate()
+                    .for_each(|(i, elem)| sum += elem * data[Self::map_index([j, i], idx)]);
             });
 
             sum
@@ -286,6 +288,23 @@ mod kernel {
         #[inline]
         fn shape() -> Shape2D {
             KERNEL_GAUSS_SHAPE
+        }
+
+        #[inline]
+        fn map_index(k_ind: Ix2, data_ind: Ix2) -> Ix2 {
+            [data_ind[0] + k_ind[0] - 1, data_ind[1] + k_ind[1] - 1]
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use crate::kernel::{Blur, Kernel};
+
+        // FIXME: is doc test, remove when crate is turned into library
+        #[test]
+        fn map_index_does_produce_correct_results() {
+            assert_eq!(Blur::map_index([0, 0], [4, 5]), [3, 4]);
+            assert_eq!(Blur::map_index([2, 1], [4, 5]), [5, 5]);
         }
     }
 }
