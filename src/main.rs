@@ -81,6 +81,14 @@ mod data_type {
         pub fn iter(self) -> Range2D {
             self.into_iter()
         }
+
+        /// Conversion from `Ix2` into linear index.
+        ///
+        /// 2D indexing is assumed to be row-major, i.e. last index vary fastest.
+        #[inline]
+        pub fn index_into_usize(&self, i: Ix2) -> usize {
+            self.1 * i[0] + i[1]
+        }
     }
 
     impl IntoIterator for Size2D {
@@ -106,6 +114,7 @@ mod data_type {
             }
         }
 
+        #[inline]
         pub fn size(&self) -> Size2D {
             self.size
         }
@@ -116,7 +125,7 @@ mod data_type {
         // row major indexing
         #[inline]
         fn index(&self, index: Ix2) -> &Item {
-            &self.data[self.size.1 * index[0] + index[1]]
+            &self[self.size.index_into_usize(index)]
         }
     }
 
@@ -124,7 +133,24 @@ mod data_type {
         // row major indexing
         #[inline]
         fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
-            &mut self.data[self.size.1 * index[0] + index[1]]
+            let index = self.size().index_into_usize(index);
+            &mut self[index]
+        }
+    }
+
+    impl Index<usize> for Arr2D {
+        type Output = Item;
+
+        #[inline]
+        fn index(&self, index: usize) -> &Self::Output {
+            &self.data[index]
+        }
+    }
+
+    impl IndexMut<usize> for Arr2D {
+        #[inline]
+        fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+            &mut self.data[index]
         }
     }
 
