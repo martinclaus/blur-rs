@@ -251,27 +251,31 @@ mod kernel {
 
     pub struct Blur;
 
-    const KERNEL_GAUSS: [Item; 9] = [
-        1.0 / 16.0,
-        2.0 / 16.0,
-        1.0 / 16.0,
-        2.0 / 16.0,
-        4.0 / 16.0,
-        2.0 / 16.0,
-        1.0 / 16.0,
-        2.0 / 16.0,
-        1.0 / 16.0,
-    ];
-
-    const KERNEL_GAUSS_SHAPE: Shape2D = Shape2D(3, 3);
-
     impl Blur {
+        /// Flags indices as not processable.
         #[inline]
         fn not_process(idx: Ix2, shape: Shape2D) -> bool {
             idx[0] < Self::shape().0
                 || idx[0] >= shape.0 - Self::shape().0
                 || idx[1] < Self::shape().1
                 || idx[1] >= shape.1 - Self::shape().1
+        }
+
+        ///
+        #[inline]
+        const fn kernel() -> [Item; 9] {
+            const KERNEL_GAUSS: [Item; 9] = [
+                1.0 / 16.0,
+                2.0 / 16.0,
+                1.0 / 16.0,
+                2.0 / 16.0,
+                4.0 / 16.0,
+                2.0 / 16.0,
+                1.0 / 16.0,
+                2.0 / 16.0,
+                1.0 / 16.0,
+            ];
+            KERNEL_GAUSS
         }
     }
 
@@ -286,7 +290,7 @@ mod kernel {
             // convolve with kernel
             Self::shape()
                 .iter()
-                .zip(KERNEL_GAUSS.iter())
+                .zip(Self::kernel().iter())
                 .for_each(|(k_idx, elem)| {
                     sum += elem * data[Self::map_index(k_idx, idx)];
                 });
@@ -296,6 +300,7 @@ mod kernel {
 
         #[inline]
         fn shape() -> Shape2D {
+            const KERNEL_GAUSS_SHAPE: Shape2D = Shape2D(3, 3);
             KERNEL_GAUSS_SHAPE
         }
 
