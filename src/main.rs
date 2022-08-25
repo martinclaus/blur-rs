@@ -27,15 +27,14 @@ fn main() {
         SerialExecutor::run(Blur, &d_out, &mut d_in);
     }
     println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
-    // (0..1000).for_each(|i| print! {"{:#.2e},", d_in[[500, i]]});
+    (0..1000).for_each(|i| print! {"{:#.2e},", d_in[[500, i]]});
 }
 
 mod data_type {
     use std::iter::IntoIterator;
     use std::ops::{Index, IndexMut, Range};
+    use std::slice::{Iter, IterMut};
 
-    #[derive(Copy, Clone, Debug)]
-    pub struct Size2D(pub usize, pub usize);
     pub type Ix2 = [usize; 2];
     pub type Item = f64;
     type Range1D = Range<usize>;
@@ -77,6 +76,9 @@ mod data_type {
         }
     }
 
+    #[derive(Copy, Clone, Debug)]
+    pub struct Size2D(pub usize, pub usize);
+
     impl Size2D {
         pub fn iter(self) -> Range2D {
             self.into_iter()
@@ -88,6 +90,14 @@ mod data_type {
         #[inline]
         pub fn index_into_usize(&self, i: Ix2) -> usize {
             self.1 * i[0] + i[1]
+        }
+
+        /// Conversion from linear index into `Ix2`.
+        ///
+        /// 2D indexing is assumed to be row-major, i.e. last index vary fastest.
+        #[inline]
+        pub fn usize_into_index(&self, i: usize) -> Ix2 {
+            [i / self.1, i % self.1]
         }
     }
 
@@ -117,6 +127,16 @@ mod data_type {
         #[inline]
         pub fn size(&self) -> Size2D {
             self.size
+        }
+
+        #[inline]
+        pub fn iter(&self) -> Iter<Item> {
+            self.data.iter()
+        }
+
+        #[inline]
+        pub fn iter_mut(&mut self) -> IterMut<Item> {
+            self.data.iter_mut()
         }
     }
 
@@ -156,13 +176,44 @@ mod data_type {
 
     #[cfg(test)]
     mod test {
-        use super::{Ix2, Size2D};
+
+        use super::{Arr2D, Ix2, Size2D};
+
+        #[test]
+        fn linear_to_tuple_index() {
+            let size = Size2D(2, 3);
+            let res: Vec<Ix2> = size
+                .iter()
+                .enumerate()
+                .map(|(i, _ind)| size.usize_into_index(i))
+                .collect();
+            assert_eq!(res, vec![[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2],])
+        }
+
+        #[test]
+        fn tuple_index_to_linear() {
+            let size = Size2D(2, 3);
+            let res: Vec<usize> = size.iter().map(|ind| size.index_into_usize(ind)).collect();
+            let oracle: Vec<usize> = (0..(size.0 * size.1)).collect();
+            assert_eq!(res, oracle)
+        }
 
         #[test]
         fn range2d_iterates_over_all_indices() {
             let s = Size2D(2, 3);
             let res: Vec<Ix2> = s.iter().collect();
             assert_eq!(res, vec![[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]]);
+        }
+
+        #[test]
+        fn arr2d_iter_mut_with_index_in_bounds() {
+            let size = Size2D(500, 100);
+            let mut data = Arr2D::full(1f64, size);
+            let data2 = Arr2D::full(2f64, size);
+            size.iter()
+                .zip(data.iter_mut())
+                .for_each(|(ind, out)| *out = data2[ind]);
+            assert!(data.iter().all(|d| *d == 2.0));
         }
     }
 }
@@ -235,18 +286,15 @@ mod executor {
         fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
             let kernel_size = K::size();
             let size = res.size();
-            let index = size
-                .iter()
-                // assume symmetric kernel
-                .filter(|ind| {
-                    ind[0] >= kernel_size.0
-                        && ind[0] < size.0 - kernel_size.0
-                        && ind[1] >= kernel_size.1
-                        && ind[1] < size.1 - kernel_size.1
-                });
-            index.for_each(|ind| {
-                res[ind] = K::eval(data, ind);
-            })
+            size.iter()
+                .zip(res.iter_mut())
+                .filter(|(idx, _)| {
+                    idx[0] >= kernel_size.0
+                        && idx[0] < size.0 - kernel_size.0
+                        && idx[1] >= kernel_size.1
+                        && idx[1] < size.1 - kernel_size.1
+                })
+                .for_each(|(idx, d)| *d = K::eval(data, idx));
         }
     }
 }
