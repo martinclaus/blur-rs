@@ -1,16 +1,46 @@
+use rayon::ThreadPool;
+
 use crate::{
     data_type::{Arr2D, Shape2D},
-    executor::{Executor, SerialExecutor},
+    executor::{Executor, RayonExecutor, SerialExecutor},
     kernel::Blur,
 };
 use std::time::Instant;
 
 fn main() {
+    println!("SerialExecutor");
+    print_arr_sample(run_benchmark::<SerialExecutor>());
+
+    // parallel execution
+    for nthreads in (2..=16).step_by(2) {
+        println!("RayonExecutor ({} threads)", nthreads);
+        print_arr_sample(make_thread_pool(nthreads).install(run_benchmark::<RayonExecutor>));
+    }
+}
+
+fn make_thread_pool(nthreads: usize) -> ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(nthreads)
+        .build()
+        .unwrap()
+}
+
+fn print_arr_sample(arr: Arr2D) {
+    let i = arr.shape().0 / 2 - arr.shape().1 / 10 - 200;
+    print!("Output Sample: ");
+    (i..i + 6).for_each(|i| print! {"{:#.2e}, ", arr[[arr.shape().0 / 2, i]]});
+    println!();
+}
+
+fn run_benchmark<E: Executor>() -> Arr2D {
     let shape = Shape2D(1000, 1000);
+    let rep = 100;
 
     let mut d_in = Arr2D::full(0f64, shape);
     d_in.shape().iter().for_each(|ind| {
-        if ((ind[0] as i64) - 499).pow(2) < 10_000 && ((ind[1] as i64) - 499).pow(2) < 10_000 {
+        if ((ind[0] as i64) - (shape.0 as i64) / 2).abs() < (shape.1 / 10) as i64
+            && ((ind[1] as i64) - (shape.1 as i64) / 2).abs() < (shape.1 / 10) as i64
+        {
             d_in[ind] = 1f64;
         } else {
             d_in[ind] = 0f64;
@@ -19,21 +49,21 @@ fn main() {
 
     let mut d_out = Arr2D::full(0f64, shape);
 
-    let rep = 100;
-
     let now = Instant::now();
     for _ in 0..rep {
-        SerialExecutor::run(Blur, &d_in, &mut d_out);
-        SerialExecutor::run(Blur, &d_out, &mut d_in);
+        E::run(Blur, &d_in, &mut d_out);
+        E::run(Blur, &d_out, &mut d_in);
     }
     println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
-    (0..1000).for_each(|i| print! {"{:#.2e},", d_in[[500, i]]});
+    d_in
 }
 
 mod data_type {
     use std::iter::IntoIterator;
     use std::ops::{Index, IndexMut, Range};
     use std::slice::{Iter, IterMut};
+
+    use rayon::prelude::*;
 
     pub type Ix2 = [usize; 2];
     pub type Item = f64;
@@ -139,6 +169,18 @@ mod data_type {
         #[inline]
         pub fn iter_mut(&mut self) -> IterMut<Item> {
             self.data.iter_mut()
+        }
+
+        #[inline]
+        // FIXME: make this a feature
+        pub fn par_iter(&self) -> rayon::slice::Iter<Item> {
+            self.data.par_iter()
+        }
+
+        #[inline]
+        // FIXME: make this a feature
+        pub fn par_iter_mut(&mut self) -> rayon::slice::IterMut<Item> {
+            self.data.par_iter_mut()
         }
     }
 
@@ -326,6 +368,7 @@ mod kernel {
 mod executor {
     use crate::data_type::Arr2D;
     use crate::kernel::Kernel;
+    use rayon::prelude::*;
 
     pub trait Executor {
         /// Apply kernel operation to all possible indices of `res` and populate it with the results.
@@ -338,10 +381,21 @@ mod executor {
     impl Executor for SerialExecutor {
         fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
-            shape
-                .iter()
-                .zip(res.iter_mut())
-                .for_each(|(idx, d)| *d = K::eval(data, idx));
+            res.iter_mut()
+                .zip(shape.iter())
+                .for_each(|(d, idx)| *d = K::eval(data, idx));
+        }
+    }
+
+    // FIXME: make this a feature
+    pub struct RayonExecutor;
+
+    impl Executor for RayonExecutor {
+        fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
+            let shape = res.shape();
+            res.par_iter_mut().enumerate().for_each(|(i, out)| {
+                *out = K::eval(data, shape.usize_into_index(i));
+            });
         }
     }
 }
