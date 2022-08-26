@@ -1,13 +1,10 @@
-use rayon::ThreadPool;
-
 use crate::{
-    data_type::{Arr2D, Shape2D},
-    executor::{Executor, RayonExecutor, SerialExecutor},
-    kernel::Blur,
+    bench::{make_thread_pool, print_arr_sample, run_benchmark},
+    executor::{RayonExecutor, SerialExecutor},
 };
-use std::time::Instant;
 
 fn main() {
+    // serial execution
     println!("SerialExecutor");
     print_arr_sample(run_benchmark::<SerialExecutor>());
 
@@ -18,44 +15,56 @@ fn main() {
     }
 }
 
-fn make_thread_pool(nthreads: usize) -> ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(nthreads)
-        .build()
-        .unwrap()
-}
+mod bench {
+    use std::time::Instant;
 
-fn print_arr_sample(arr: Arr2D) {
-    let i = arr.shape().0 / 2 - arr.shape().1 / 10 - 200;
-    print!("Output Sample: ");
-    (i..i + 6).for_each(|i| print! {"{:#.2e}, ", arr[[arr.shape().0 / 2, i]]});
-    println!();
-}
+    use rayon::ThreadPool;
 
-fn run_benchmark<E: Executor>() -> Arr2D {
-    let shape = Shape2D(1000, 1000);
-    let rep = 100;
+    use crate::{
+        data_type::{Arr2D, Shape2D},
+        executor::Executor,
+        kernel::Blur,
+    };
 
-    let mut d_in = Arr2D::full(0f64, shape);
-    d_in.shape().iter().for_each(|ind| {
-        if ((ind[0] as i64) - (shape.0 as i64) / 2).abs() < (shape.1 / 10) as i64
-            && ((ind[1] as i64) - (shape.1 as i64) / 2).abs() < (shape.1 / 10) as i64
-        {
-            d_in[ind] = 1f64;
-        } else {
-            d_in[ind] = 0f64;
-        }
-    });
-
-    let mut d_out = Arr2D::full(0f64, shape);
-
-    let now = Instant::now();
-    for _ in 0..rep {
-        E::run(Blur, &d_in, &mut d_out);
-        E::run(Blur, &d_out, &mut d_in);
+    pub fn make_thread_pool(nthreads: usize) -> ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(nthreads)
+            .build()
+            .unwrap()
     }
-    println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
-    d_in
+
+    pub fn print_arr_sample(arr: Arr2D) {
+        let i = arr.shape().0 / 2 - arr.shape().1 / 10 - 200;
+        print!("Output Sample: ");
+        (i..i + 6).for_each(|i| print! {"{:#.2e}, ", arr[[arr.shape().0 / 2, i]]});
+        println!();
+    }
+
+    pub fn run_benchmark<E: Executor>() -> Arr2D {
+        let shape = Shape2D(1000, 1000);
+        let rep = 100;
+
+        let mut d_in = Arr2D::full(0f64, shape);
+        d_in.shape().iter().for_each(|ind| {
+            if ((ind[0] as i64) - (shape.0 as i64) / 2).abs() < (shape.1 / 10) as i64
+                && ((ind[1] as i64) - (shape.1 as i64) / 2).abs() < (shape.1 / 10) as i64
+            {
+                d_in[ind] = 1f64;
+            } else {
+                d_in[ind] = 0f64;
+            }
+        });
+
+        let mut d_out = Arr2D::full(0f64, shape);
+
+        let now = Instant::now();
+        for _ in 0..rep {
+            E::run(Blur, &d_in, &mut d_out);
+            E::run(Blur, &d_out, &mut d_in);
+        }
+        println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
+        d_in
+    }
 }
 
 mod data_type {
