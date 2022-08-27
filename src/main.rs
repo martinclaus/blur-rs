@@ -59,8 +59,8 @@ mod bench {
 
         let now = Instant::now();
         for _ in 0..rep {
-            E::run(Blur, &d_in, &mut d_out);
-            E::run(Blur, &d_out, &mut d_in);
+            E::run::<Blur>(&d_in, &mut d_out);
+            E::run::<Blur>(&d_out, &mut d_in);
         }
         println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
         d_in
@@ -378,21 +378,23 @@ mod executor {
     use crate::data_type::Arr2D;
     use crate::kernel::Kernel;
     use rayon::prelude::*;
+    use rayon::range::Iter;
 
     pub trait Executor {
         /// Apply kernel operation to all possible indices of `res` and populate it with the results.
-        fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D);
+        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D);
     }
 
     /// Simple serial (single-threaded) executor.
     pub struct SerialExecutor;
 
     impl Executor for SerialExecutor {
-        fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
             res.iter_mut()
-                .zip(shape.iter())
-                .for_each(|(d, idx)| *d = K::eval(data, idx));
+                // .zip(shape.iter())
+                .enumerate() // replace by line above to speed up by factor of ~1.5
+                .for_each(|(i, d)| *d = K::eval(data, shape.usize_into_index(i)))
         }
     }
 
@@ -400,8 +402,9 @@ mod executor {
     pub struct RayonExecutor;
 
     impl Executor for RayonExecutor {
-        fn run<K: Kernel>(_kernel: K, data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
+            // FIXME: use parallel iterator for index
             res.par_iter_mut().enumerate().for_each(|(i, out)| {
                 *out = K::eval(data, shape.usize_into_index(i));
             });
