@@ -1,6 +1,9 @@
 use crate::{
     bench::{make_thread_pool, print_arr_sample, run_benchmark},
-    executor::{RayonExecutor, SerialExecutor, ThreadSharedMutableStateExecutor},
+    executor::{
+        RayonExecutor, SerialExecutor, ThreadChannelExecutor, ThreadPoolExecutor,
+        ThreadSharedMutableStateExecutor,
+    },
 };
 
 fn main() {
@@ -15,12 +18,18 @@ fn main() {
         print_arr_sample(make_thread_pool(nthreads).install(run_benchmark::<RayonExecutor>));
     }
 
-    println!("ThreadExecutor (8 threads)");
+    println!("ThreadSharedMutableStateExecutor (8 threads)");
     print_arr_sample(run_benchmark::<ThreadSharedMutableStateExecutor>());
+
+    println!("ThreadChannelExecutor (8 threads)");
+    print_arr_sample(run_benchmark::<ThreadChannelExecutor>());
+
+    println!("ThreadPoolExecutor (8 threads)");
+    print_arr_sample(run_benchmark::<ThreadPoolExecutor>());
 }
 
 mod bench {
-    use std::time::Instant;
+    use std::{any::type_name, time::Instant};
 
     use rayon::ThreadPool;
 
@@ -45,6 +54,7 @@ mod bench {
     }
 
     pub fn run_benchmark<E: Executor>() -> Arr2D {
+        // println!("{}", type_name::<E>());
         let shape = Shape2D(1000, 1000);
         let rep = 100;
 
@@ -393,8 +403,9 @@ mod kernel {
 }
 
 mod executor {
+    use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::{Arc, Mutex};
-    use std::thread;
+    use std::thread::{self, JoinHandle};
 
     use crate::data_type::{Arr2D, Item, Range2D};
     use crate::kernel::Kernel;
@@ -459,7 +470,7 @@ mod executor {
 
     impl Executor for ThreadSharedMutableStateExecutor {
         fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
-            let nthreads = 2;
+            let nthreads = 8;
             let shape = res.shape();
             let index_range = Self::split_index_range(nthreads, shape.0);
 
@@ -478,6 +489,137 @@ mod executor {
                             .zip(answer)
                             .for_each(|(r, a)| *r = a);
                     });
+                }
+            });
+        }
+    }
+
+    pub struct ThreadChannelExecutor;
+
+    impl ThreadChannelExecutor {
+        fn split_index_range(nthreads: usize, len: usize) -> Vec<(usize, usize)> {
+            let mut index_range = vec![];
+            let step = len / nthreads;
+            let mut remainder = len % nthreads;
+            let mut start_i0 = vec![0];
+            let mut next = 0;
+            for _ in 0..nthreads - 1 {
+                if let Some(last) = start_i0.last() {
+                    next = last + step;
+                    if remainder != 0 {
+                        next += 1;
+                        remainder -= 1;
+                    }
+                    index_range.push((*last, next));
+                    start_i0.push(next);
+                }
+            }
+            index_range.push((next, len));
+            index_range
+        }
+    }
+
+    impl Executor for ThreadChannelExecutor {
+        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+            let nthreads = 8;
+            let shape = res.shape();
+            let index_range = Self::split_index_range(nthreads, shape.0);
+
+            let (tx, rv) = channel();
+            thread::scope(|s| {
+                let nthreads = index_range.len();
+                for (i0, i1) in index_range {
+                    let tx = tx.clone();
+                    s.spawn(move || {
+                        let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
+                            .map(|idx| K::eval(data, idx))
+                            .collect();
+                        tx.send((i0 * shape.1, answer)).unwrap();
+                    });
+                }
+                for _ in 0..nthreads {
+                    let (i, answer) = rv.recv().unwrap();
+                    res[i..i + answer.len()]
+                        .iter_mut()
+                        .zip(answer)
+                        .for_each(|(r, a)| {
+                            *r = a;
+                        })
+                }
+            });
+        }
+    }
+
+    pub struct ThreadPoolExecutor;
+
+    impl ThreadPoolExecutor {
+        fn split_index_range(nchunks: usize, len: usize) -> Vec<(usize, usize)> {
+            let mut index_range = vec![];
+            let step = len / nchunks;
+            let mut remainder = len % nchunks;
+            let mut start_i0 = vec![0];
+            let mut next = 0;
+            for _ in 0..nchunks - 1 {
+                if let Some(last) = start_i0.last() {
+                    next = last + step;
+                    if remainder != 0 {
+                        next += 1;
+                        remainder -= 1;
+                    }
+                    index_range.push((*last, next));
+                    start_i0.push(next);
+                }
+            }
+            index_range.push((next, len));
+            index_range
+        }
+    }
+
+    impl Executor for ThreadPoolExecutor {
+        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+            let nthreads = 8;
+            let shape = res.shape();
+            let nchunks = nthreads * 5;
+            let index_range = Self::split_index_range(nchunks, shape.0);
+
+            // println!("{:#?}", index_range);
+
+            thread::scope(|s| {
+                let (tx, rv) = channel();
+
+                // spin up pool of workers
+                let mut thread_sender = Vec::<Sender<(usize, usize)>>::with_capacity(nthreads);
+                for _ in 0..nthreads {
+                    let tx = tx.clone();
+                    let (sender, rx) = channel::<(usize, usize)>();
+                    thread_sender.push(sender);
+                    s.spawn(move || {
+                        // will end when channel is disconnected
+                        for (i0, i1) in rx {
+                            let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
+                                .map(|idx| K::eval(data, idx))
+                                .collect();
+                            tx.send(((i0 * shape.1, i1 * shape.1), answer)).unwrap();
+                        }
+                    });
+                }
+                drop(tx);
+
+                // feed workers with tasks
+                let mut msgs = 0;
+                index_range
+                    .iter()
+                    .zip(thread_sender.into_iter().cycle())
+                    .for_each(|(work, thread)| {
+                        thread.send(*work).unwrap();
+                        msgs += 1;
+                    });
+
+                // collect results
+                while msgs != 0 {
+                    let ((i0, i1), answer) = rv.recv().expect("Oops, thread has panicked");
+                    res[i0..i1].iter_mut().zip(answer).for_each(|(r, a)| *r = a);
+                    msgs -= 1;
                 }
             });
         }
