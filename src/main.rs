@@ -1,6 +1,6 @@
 use crate::{
     bench::{make_thread_pool, print_arr_sample, run_benchmark},
-    executor::{RayonExecutor, SerialExecutor},
+    executor::{RayonExecutor, SerialExecutor, ThreadSharedMutableStateExecutor},
 };
 
 fn main() {
@@ -9,10 +9,14 @@ fn main() {
     print_arr_sample(run_benchmark::<SerialExecutor>());
 
     // parallel execution
-    for nthreads in (2..=16).step_by(2) {
+    for nthreads in [8] {
+        //(2..=16).step_by(2) {
         println!("RayonExecutor ({} threads)", nthreads);
         print_arr_sample(make_thread_pool(nthreads).install(run_benchmark::<RayonExecutor>));
     }
+
+    println!("ThreadExecutor (8 threads)");
+    print_arr_sample(run_benchmark::<ThreadSharedMutableStateExecutor>());
 }
 
 mod bench {
@@ -79,7 +83,7 @@ mod data_type {
     type Range1D = Range<usize>;
 
     #[derive(Clone, Debug)]
-    pub struct Range2D(Range1D, Range1D);
+    pub struct Range2D(pub Range1D, pub Range1D);
 
     impl From<Shape2D> for Range2D {
         #[inline]
@@ -223,6 +227,20 @@ mod data_type {
     impl IndexMut<usize> for Arr2D {
         #[inline]
         fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+            &mut self.data[index]
+        }
+    }
+
+    impl Index<Range1D> for Arr2D {
+        type Output = [Item];
+
+        fn index(&self, index: Range1D) -> &Self::Output {
+            &self.data[index]
+        }
+    }
+
+    impl IndexMut<Range1D> for Arr2D {
+        fn index_mut(&mut self, index: Range1D) -> &mut Self::Output {
             &mut self.data[index]
         }
     }
@@ -375,10 +393,12 @@ mod kernel {
 }
 
 mod executor {
-    use crate::data_type::Arr2D;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    use crate::data_type::{Arr2D, Item, Range2D};
     use crate::kernel::Kernel;
     use rayon::prelude::*;
-    use rayon::range::Iter;
 
     pub trait Executor {
         /// Apply kernel operation to all possible indices of `res` and populate it with the results.
@@ -399,6 +419,7 @@ mod executor {
     }
 
     // FIXME: make this a feature
+    /// Executor build upon rayon.
     pub struct RayonExecutor;
 
     impl Executor for RayonExecutor {
@@ -407,6 +428,57 @@ mod executor {
             // FIXME: use parallel iterator for index
             res.par_iter_mut().enumerate().for_each(|(i, out)| {
                 *out = K::eval(data, shape.usize_into_index(i));
+            });
+        }
+    }
+
+    pub struct ThreadSharedMutableStateExecutor;
+
+    impl ThreadSharedMutableStateExecutor {
+        fn split_index_range(nthreads: usize, len: usize) -> Vec<(usize, usize)> {
+            let mut index_range = vec![];
+            let step = len / nthreads;
+            let mut remainder = len % nthreads;
+            let mut start_i0 = vec![0];
+            let mut next = 0;
+            for _ in 0..nthreads - 1 {
+                if let Some(last) = start_i0.last() {
+                    next = last + step;
+                    if remainder != 0 {
+                        next += 1;
+                        remainder -= 1;
+                    }
+                    index_range.push((*last, next));
+                    start_i0.push(next);
+                }
+            }
+            index_range.push((next, len));
+            index_range
+        }
+    }
+
+    impl Executor for ThreadSharedMutableStateExecutor {
+        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+            let nthreads = 2;
+            let shape = res.shape();
+            let index_range = Self::split_index_range(nthreads, shape.0);
+
+            let res = Arc::new(Mutex::new(res));
+
+            thread::scope(|s| {
+                for (i0, i1) in index_range {
+                    let res = res.clone();
+                    s.spawn(move || {
+                        let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
+                            .map(|idx| K::eval(data, idx))
+                            .collect();
+                        let mut res = res.lock().unwrap();
+                        res[i0 * shape.1..i1 * shape.1 - 1]
+                            .iter_mut()
+                            .zip(answer)
+                            .for_each(|(r, a)| *r = a);
+                    });
+                }
             });
         }
     }
