@@ -9,27 +9,28 @@ use crate::{
 fn main() {
     // serial execution
     println!("SerialExecutor");
-    print_arr_sample(run_benchmark::<SerialExecutor>());
+    print_arr_sample(run_benchmark(SerialExecutor {}));
 
     // parallel execution
     for nthreads in [8] {
         //(2..=16).step_by(2) {
+        let executor = RayonExecutor {};
         println!("RayonExecutor ({} threads)", nthreads);
-        print_arr_sample(make_thread_pool(nthreads).install(run_benchmark::<RayonExecutor>));
+        print_arr_sample(make_thread_pool(nthreads).install(|| run_benchmark(executor)));
     }
 
     println!("ThreadSharedMutableStateExecutor (8 threads)");
-    print_arr_sample(run_benchmark::<ThreadSharedMutableStateExecutor>());
+    print_arr_sample(run_benchmark(ThreadSharedMutableStateExecutor {}));
 
     println!("ThreadChannelExecutor (8 threads)");
-    print_arr_sample(run_benchmark::<ThreadChannelExecutor>());
+    print_arr_sample(run_benchmark(ThreadChannelExecutor {}));
 
     println!("ThreadPoolExecutor (8 threads)");
-    print_arr_sample(run_benchmark::<ThreadPoolExecutor>());
+    print_arr_sample(run_benchmark(ThreadPoolExecutor {}));
 }
 
 mod bench {
-    use std::{any::type_name, time::Instant};
+    use std::time::Instant;
 
     use rayon::ThreadPool;
 
@@ -53,7 +54,7 @@ mod bench {
         println!();
     }
 
-    pub fn run_benchmark<E: Executor>() -> Arr2D {
+    pub fn run_benchmark<E: Executor>(exec: E) -> Arr2D {
         // println!("{}", type_name::<E>());
         let shape = Shape2D(1000, 1000);
         let rep = 100;
@@ -73,8 +74,8 @@ mod bench {
 
         let now = Instant::now();
         for _ in 0..rep {
-            E::run::<Blur>(&d_in, &mut d_out);
-            E::run::<Blur>(&d_out, &mut d_in);
+            exec.run::<Blur>(&d_in, &mut d_out);
+            exec.run::<Blur>(&d_out, &mut d_in);
         }
         println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
         d_in
@@ -413,14 +414,14 @@ mod executor {
 
     pub trait Executor {
         /// Apply kernel operation to all possible indices of `res` and populate it with the results.
-        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D);
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D);
     }
 
     /// Simple serial (single-threaded) executor.
     pub struct SerialExecutor;
 
     impl Executor for SerialExecutor {
-        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
             res.iter_mut()
                 // .zip(shape.iter())
@@ -434,7 +435,7 @@ mod executor {
     pub struct RayonExecutor;
 
     impl Executor for RayonExecutor {
-        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
             // FIXME: use parallel iterator for index
             res.par_iter_mut().enumerate().for_each(|(i, out)| {
@@ -469,7 +470,7 @@ mod executor {
     }
 
     impl Executor for ThreadSharedMutableStateExecutor {
-        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads = 8;
             let shape = res.shape();
             let index_range = Self::split_index_range(nthreads, shape.0);
@@ -520,7 +521,7 @@ mod executor {
     }
 
     impl Executor for ThreadChannelExecutor {
-        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads = 8;
             let shape = res.shape();
             let index_range = Self::split_index_range(nthreads, shape.0);
@@ -576,7 +577,7 @@ mod executor {
     }
 
     impl Executor for ThreadPoolExecutor {
-        fn run<K: Kernel>(data: &Arr2D, res: &mut Arr2D) {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads = 8;
             let shape = res.shape();
             let nchunks = nthreads * 5;
