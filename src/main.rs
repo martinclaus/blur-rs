@@ -26,7 +26,7 @@ fn main() {
     print_arr_sample(run_benchmark(ThreadChannelExecutor {}));
 
     println!("ThreadPoolExecutor (8 threads)");
-    print_arr_sample(run_benchmark(ThreadPoolExecutor {}));
+    print_arr_sample(run_benchmark(ThreadPoolExecutor::new(8)));
 }
 
 mod bench {
@@ -70,7 +70,7 @@ mod bench {
             }
         });
 
-        let mut d_out = Arr2D::full(0f64, shape);
+        let mut d_out = Arr2D::full(5f64, shape);
 
         let now = Instant::now();
         for _ in 0..rep {
@@ -404,7 +404,7 @@ mod kernel {
 }
 
 mod executor {
-    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
 
@@ -551,7 +551,9 @@ mod executor {
         }
     }
 
-    pub struct ThreadPoolExecutor;
+    pub struct ThreadPoolExecutor {
+        tp: ThreadPool,
+    }
 
     impl ThreadPoolExecutor {
         fn split_index_range(nchunks: usize, len: usize) -> Vec<(usize, usize)> {
@@ -574,55 +576,145 @@ mod executor {
             index_range.push((next, len));
             index_range
         }
+
+        pub fn new(nthreads: usize) -> Self {
+            ThreadPoolExecutor {
+                tp: ThreadPool::new(nthreads),
+            }
+        }
     }
 
     impl Executor for ThreadPoolExecutor {
-        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
-            let nthreads = 8;
+        fn run<'a, K: Kernel>(&self, data: &'a Arr2D, res: &mut Arr2D) {
+            let nthreads = self.tp.nthreads();
             let shape = res.shape();
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            // println!("{:#?}", index_range);
+            self.tp.execute(
+                move |(i0, i1)| {
+                    ((i0, i1), 1.0)
+                    // let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
+                    // .map(|idx| K::eval(data, idx))
+                    // .collect();
+                    // ((i0 * shape.1, i1 * shape.1), answer)
+                },
+                // |((i0, i1), answer)| {
+                //     res[i0..i1]
+                //         .iter_mut()
+                //         .zip(answer.into_iter())
+                //         .for_each(|(r, a)| *r = a)
+                // },
+                |((i0, i1), _answer)| res[i0..i1].iter_mut().for_each(|r| *r = 1.0 + *r / 2.0),
+                index_range.into_iter(),
+            );
+            // let (work_sender, results) = self.tp.execute(move |sender, receiver| {
+            //     for (i0, i1) in receiver {
+            //         let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
+            //             .map(|idx| K::eval(data, idx))
+            //             .collect();
+            //         sender.send(((i0 * shape.1, i1 * shape.1), answer)).unwrap();
+            //     }
+            // });
 
-            thread::scope(|s| {
-                let (tx, rv) = channel();
+            // });
+        }
+    }
 
-                // spin up pool of workers
-                let mut thread_sender = Vec::<Sender<(usize, usize)>>::with_capacity(nthreads);
-                for _ in 0..nthreads {
-                    let tx = tx.clone();
-                    let (sender, rx) = channel::<(usize, usize)>();
-                    thread_sender.push(sender);
-                    s.spawn(move || {
-                        // will end when channel is disconnected
-                        for (i0, i1) in rx {
-                            let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
-                                .map(|idx| K::eval(data, idx))
-                                .collect();
-                            tx.send(((i0 * shape.1, i1 * shape.1), answer)).unwrap();
+    type ThreadTask = Box<dyn FnOnce() + Send>;
+
+    struct ThreadPool {
+        handle: Vec<JoinHandle<()>>,
+        task_sender: Vec<SyncSender<ThreadTask>>,
+    }
+
+    impl ThreadPool {
+        fn new(nthreads: usize) -> Self {
+            // spin up worker
+            let mut handle = Vec::<JoinHandle<()>>::with_capacity(nthreads);
+
+            let mut task_sender = Vec::<SyncSender<ThreadTask>>::with_capacity(nthreads);
+            for _ in 0..nthreads {
+                let (sender, receiver) = sync_channel::<ThreadTask>(nthreads);
+                task_sender.push(sender);
+                handle.push(thread::spawn(|| {
+                    for task in receiver {
+                        task()
+                    }
+                }));
+            }
+
+            ThreadPool {
+                handle,
+                task_sender,
+            }
+        }
+
+        fn nthreads(&self) -> usize {
+            self.handle.len()
+        }
+
+        fn execute<F, C, W, R, I>(&self, task: F, mut collector: C, work: I)
+        where
+            F: Fn(W) -> R + Send + Copy + 'static,
+            C: FnMut(R),
+            R: Send + 'static,
+            W: Send + 'static,
+            I: Iterator<Item = W>,
+        {
+            let (result_sender, result_recv) = channel::<R>();
+            let mut work_sender = Vec::<Sender<W>>::with_capacity(self.nthreads());
+            let (completed_sender, completed_recv) = channel::<Result<(), ()>>();
+            self // iterate over slice to not consume task_receiver and thereby disconnect all channels.
+                .task_sender
+                .iter()
+                .for_each(|thread| {
+                    // setup channels to send work and receive results
+                    let result_sender = result_sender.clone();
+                    let (ws, work_recv) = channel::<W>();
+                    work_sender.push(ws);
+
+                    let completed = completed_sender.clone();
+
+                    let b_task: ThreadTask = Box::new(move || {
+                        for work in work_recv {
+                            result_sender
+                                .send(task(work))
+                                .expect("Should be able to send result from thread.");
                         }
-                    });
-                }
-                drop(tx);
-
-                // feed workers with tasks
-                let mut msgs = 0;
-                index_range
-                    .iter()
-                    .zip(thread_sender.into_iter().cycle())
-                    .for_each(|(work, thread)| {
-                        thread.send(*work).unwrap();
-                        msgs += 1;
+                        completed
+                            .send(Ok(()))
+                            .expect("Should be able to send completed signal from thread.");
                     });
 
-                // collect results
-                while msgs != 0 {
-                    let ((i0, i1), answer) = rv.recv().expect("Oops, thread has panicked");
-                    res[i0..i1].iter_mut().zip(answer).for_each(|(r, a)| *r = a);
-                    msgs -= 1;
-                }
-            });
+                    // send task to thread
+                    thread
+                        .send(b_task)
+                        .expect("Should be able to send task to thread");
+                });
+
+            // feed workers with tasks
+            let mut msgs = 0;
+            work.zip(work_sender.into_iter().cycle())
+                .for_each(|(work, thread)| {
+                    thread.send(work).unwrap();
+                    msgs += 1;
+                });
+
+            // collect results
+            while msgs != 0 {
+                let res = result_recv.recv().expect("Threads should not panic.");
+                collector(res);
+                msgs -= 1;
+            }
+
+            // block until all tasks have finished
+            for _ in &self.task_sender {
+                completed_recv
+                    .recv()
+                    .expect("Threads should not panic.")
+                    .expect("Is always Ok");
+            }
         }
     }
 }
