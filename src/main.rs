@@ -404,7 +404,8 @@ mod kernel {
 }
 
 mod executor {
-    use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+    use std::cell::RefCell;
+    use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
 
@@ -481,9 +482,8 @@ mod executor {
                 for (i0, i1) in index_range {
                     let res = res.clone();
                     s.spawn(move || {
-                        let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
-                            .map(|idx| K::eval(data, idx))
-                            .collect();
+                        let mut answer = Vec::<Item>::with_capacity((i1 - i0) * shape.1);
+                        Range2D(i0..i1, 0..shape.1).for_each(|idx| answer.push(K::eval(data, idx)));
                         let mut res = res.lock().unwrap();
                         res[i0 * shape.1..i1 * shape.1 - 1]
                             .iter_mut()
@@ -527,14 +527,14 @@ mod executor {
             let index_range = Self::split_index_range(nthreads, shape.0);
 
             let (tx, rv) = channel();
+
             thread::scope(|s| {
                 let nthreads = index_range.len();
                 for (i0, i1) in index_range {
                     let tx = tx.clone();
                     s.spawn(move || {
-                        let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
-                            .map(|idx| K::eval(data, idx))
-                            .collect();
+                        let mut answer = Vec::<Item>::with_capacity((i1 - i0) * shape.1);
+                        Range2D(i0..i1, 0..shape.1).for_each(|idx| answer.push(K::eval(data, idx)));
                         tx.send((i0 * shape.1, answer)).unwrap();
                     });
                 }
