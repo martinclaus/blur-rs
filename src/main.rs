@@ -12,7 +12,7 @@ fn main() {
     print_arr_sample(run_benchmark(SerialExecutor {}));
 
     // parallel execution
-    for nthreads in [8] {
+    for nthreads in [2, 4, 8, 16] {
         //(2..=16).step_by(2) {
         let executor = RayonExecutor {};
         println!("RayonExecutor ({} threads)", nthreads);
@@ -40,6 +40,7 @@ mod bench {
         kernel::Blur,
     };
 
+    /// Set up a Rayon thread pool for a given number of threads.
     pub fn make_thread_pool(nthreads: usize) -> ThreadPool {
         rayon::ThreadPoolBuilder::new()
             .num_threads(nthreads)
@@ -47,6 +48,7 @@ mod bench {
             .unwrap()
     }
 
+    /// Print slice of the final result
     pub fn print_arr_sample(arr: Arr2D) {
         let i = arr.shape().0 / 2 - arr.shape().1 / 10 - 200;
         print!("Output Sample: ");
@@ -54,6 +56,7 @@ mod bench {
         println!();
     }
 
+    /// Mockup data and run a kernel on an executor
     pub fn run_benchmark<E: Executor>(exec: E) -> Arr2D {
         // println!("{}", type_name::<E>());
         let shape = Shape2D(1000, 1000);
@@ -94,9 +97,14 @@ mod data_type {
     type Range1D = Range<usize>;
 
     #[derive(Clone, Debug)]
+
+    /// Two-dimensional range of of indices.
+    ///
+    /// This objects offers an iterator over indices.
     pub struct Range2D(pub Range1D, pub Range1D);
 
     impl From<Shape2D> for Range2D {
+        /// Convert a Shape2D into a Range over all indices.
         #[inline]
         fn from(shape: Shape2D) -> Self {
             Range2D(0..shape.0, 0..shape.1)
@@ -106,7 +114,6 @@ mod data_type {
     impl Iterator for Range2D {
         type Item = Ix2;
 
-        /// Produces indices in row-major ordering
         #[inline]
         fn next(&mut self) -> Option<Self::Item> {
             let i = match self.1.next() {
@@ -131,10 +138,12 @@ mod data_type {
         }
     }
 
+    /// Shape of an Arr2D
     #[derive(Copy, Clone, Debug)]
     pub struct Shape2D(pub usize, pub usize);
 
     impl Shape2D {
+        /// Return an iterator over all valid indices.
         pub fn iter(self) -> Range2D {
             self.into_iter()
         }
@@ -165,6 +174,7 @@ mod data_type {
         }
     }
 
+    /// 2D Array of a fixed shape
     pub struct Arr2D {
         shape: Shape2D,
         // box slice because of stack size limitations
@@ -172,6 +182,7 @@ mod data_type {
     }
 
     impl Arr2D {
+        /// New array filled with constant values.
         pub fn full(item: f64, shape: Shape2D) -> Self {
             Arr2D {
                 shape,
@@ -185,22 +196,28 @@ mod data_type {
             self.shape
         }
 
+        /// Return an iterator over all elements of the array.
+        ///
+        /// This iterator is a flat iterator and its order is row-major.
         #[inline]
         pub fn iter(&self) -> Iter<Item> {
             self.data.iter()
         }
 
+        /// Return an iterator over mutable references to all elements.
         #[inline]
         pub fn iter_mut(&mut self) -> IterMut<Item> {
             self.data.iter_mut()
         }
 
+        /// Return a Rayon parallel iterator.
         #[inline]
         // FIXME: make this a feature
         pub fn par_iter(&self) -> rayon::slice::Iter<Item> {
             self.data.par_iter()
         }
 
+        /// Return a Rayon parallel iterator over mutable references to all elements.
         #[inline]
         // FIXME: make this a feature
         pub fn par_iter_mut(&mut self) -> rayon::slice::IterMut<Item> {
@@ -404,7 +421,6 @@ mod kernel {
 }
 
 mod executor {
-    use std::cell::RefCell;
     use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
@@ -413,8 +429,9 @@ mod executor {
     use crate::kernel::Kernel;
     use rayon::prelude::*;
 
+    /// Trait for kernel executors
     pub trait Executor {
-        /// Apply kernel operation to all possible indices of `res` and populate it with the results.
+        /// Apply kernel operation to all valid indices of `res` and populate it with the results.
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D);
     }
 
@@ -425,14 +442,16 @@ mod executor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
             res.iter_mut()
-                // .zip(shape.iter())
-                .enumerate() // replace by line above to speed up by factor of ~1.5
-                .for_each(|(i, d)| *d = K::eval(data, shape.usize_into_index(i)))
+                .zip(shape.iter())
+                .for_each(|(d, idx)| *d = K::eval(data, idx))
         }
     }
 
     // FIXME: make this a feature
-    /// Executor build upon rayon.
+    /// Parallel executor build upon rayon library.
+    ///
+    /// It relies on the implementation of the ParallelIterator trait
+    /// of the underlying data structures.
     pub struct RayonExecutor;
 
     impl Executor for RayonExecutor {
@@ -445,6 +464,11 @@ mod executor {
         }
     }
 
+    /// Multi-threaded executor based on std::thread.
+    ///
+    /// Using scoped threads (Rust >= 1.63) to allow for
+    /// shared read-only access and Arc + Mutex for shared
+    /// mutable access.
     pub struct ThreadSharedMutableStateExecutor;
 
     impl ThreadSharedMutableStateExecutor {
@@ -482,8 +506,10 @@ mod executor {
                 for (i0, i1) in index_range {
                     let res = res.clone();
                     s.spawn(move || {
+                        // pre-allocated for better performance
                         let mut answer = Vec::<Item>::with_capacity((i1 - i0) * shape.1);
                         Range2D(i0..i1, 0..shape.1).for_each(|idx| answer.push(K::eval(data, idx)));
+
                         let mut res = res.lock().unwrap();
                         res[i0 * shape.1..i1 * shape.1 - 1]
                             .iter_mut()
@@ -495,6 +521,11 @@ mod executor {
         }
     }
 
+    /// Multi-threaded Executor based on std:thread and std::sync::mpsc
+    ///
+    /// Uses scoped threads for shared read-only access but sends the results
+    /// back to the main thread through a channel. This allows to not use a Mutex
+    /// but requires an allocation per sended result.
     pub struct ThreadChannelExecutor;
 
     impl ThreadChannelExecutor {
@@ -529,18 +560,19 @@ mod executor {
             let (tx, rv) = channel();
 
             thread::scope(|s| {
-                let nthreads = index_range.len();
                 for (i0, i1) in index_range {
                     let tx = tx.clone();
                     s.spawn(move || {
-                        let mut answer = Vec::<Item>::with_capacity((i1 - i0) * shape.1);
-                        Range2D(i0..i1, 0..shape.1).for_each(|idx| answer.push(K::eval(data, idx)));
-                        tx.send((i0 * shape.1, answer)).unwrap();
+                        for j in i0..i1 {
+                            let mut answer = Vec::<Item>::with_capacity(shape.1);
+                            (0..shape.1).for_each(|i| answer.push(K::eval(data, [j, i])));
+                            tx.send((j, answer)).unwrap();
+                        }
                     });
                 }
-                for _ in 0..nthreads {
-                    let (i, answer) = rv.recv().unwrap();
-                    res[i..i + answer.len()]
+                for _ in 0..shape.0 {
+                    let (j, answer) = rv.recv().unwrap();
+                    res[j * shape.1..(j + 1) * shape.1]
                         .iter_mut()
                         .zip(answer)
                         .for_each(|(r, a)| {
@@ -551,6 +583,7 @@ mod executor {
         }
     }
 
+    /// WIP Multi-threaded executor based on std::thread using a fixed pool of worker threads.
     pub struct ThreadPoolExecutor {
         tp: ThreadPool,
     }
@@ -585,7 +618,7 @@ mod executor {
     }
 
     impl Executor for ThreadPoolExecutor {
-        fn run<'a, K: Kernel>(&self, data: &'a Arr2D, res: &mut Arr2D) {
+        fn run<'a, K: Kernel>(&self, _data: &'a Arr2D, res: &mut Arr2D) {
             let nthreads = self.tp.nthreads();
             let shape = res.shape();
             let nchunks = nthreads * 5;
@@ -623,12 +656,36 @@ mod executor {
 
     type ThreadTask = Box<dyn FnOnce() + Send>;
 
+    /// Pool of worker threads.
+    ///
+    /// Worker threads are spawned on instantiation (`ThreadPool::new(nthreads)`).
+    /// When `ThreadPool` is dropped, the channels for sending tasks to the threads are
+    /// disconnected, which causes the threads to finish after completing their last task.
+    ///
+    /// The tasks send to the thread pool by value have the type `Box<dyn FnOnce() + Send>`.
+    ///
+    /// The associate method `execute` sets up a task on each worker which can be fed with work
+    /// through channels by the main thread (i.e. the thread that owns the thread pool).
+    ///
+    /// # Example
+    /// Sending a task to a thread pool:
+    /// ```rust
+    /// // Crate thread pool with two workers
+    /// let tp = ThreadPool::new(2);
+    ///
+    /// // send task to threads
+    /// tp.task_sender.iter().for_each(|ts| {
+    ///    ts.send(Box::new(|| println!("Hello from thread")))
+    ///        .expect("Should have send task")
+    /// })
+    /// ```
     struct ThreadPool {
         handle: Vec<JoinHandle<()>>,
         task_sender: Vec<SyncSender<ThreadTask>>,
     }
 
     impl ThreadPool {
+        /// Create a thread pool and spawn `nthreads` of attached worker threads.
         fn new(nthreads: usize) -> Self {
             // spin up worker
             let mut handle = Vec::<JoinHandle<()>>::with_capacity(nthreads);
@@ -650,6 +707,7 @@ mod executor {
             }
         }
 
+        /// Provide the number of spawned threads.
         fn nthreads(&self) -> usize {
             self.handle.len()
         }
@@ -715,6 +773,28 @@ mod executor {
                     .expect("Threads should not panic.")
                     .expect("Is always Ok");
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+
+        use super::ThreadPool;
+
+        #[test]
+        fn thread_pool_stops_threads_on_drop() {
+            let ThreadPool {
+                mut handle,
+                task_sender,
+            } = ThreadPool::new(2);
+
+            // disconnect task sender simulating dropping ThreadPool
+            drop(task_sender);
+
+            // wait until all threads have finished
+            handle
+                .drain(..)
+                .for_each(|jh| jh.join().expect("Could not join the associated thread."));
         }
     }
 }
