@@ -633,23 +633,32 @@ mod executor {
     }
 
     impl Executor for ThreadPoolExecutor {
-        fn run<'a, K: Kernel>(&self, _data: &'a Arr2D, res: &mut Arr2D) {
+        fn run<'a, K: Kernel>(&self, data: &'a Arr2D, res: &mut Arr2D) {
             let nthreads = self.tp.nthreads();
             let shape = res.shape();
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            let mut task = self.tp.execute(move |(i0, i1)| ((i0, i1), 1.0));
+            let mut task = self.tp.execute(move |(i0, i1)| {
+                let answer = Range2D(i0..i1, 0..shape.1)
+                    .map(|idx| K::eval(data, idx))
+                    .collect::<Vec<Item>>()
+                    .into_boxed_slice();
+                (i0 * shape.1, answer)
+            });
 
             task.scatter(index_range.into_iter());
 
             task.done();
 
             // collect results
-            for ((i0, i1), a) in task.get_result().expect("Task should be marked `done`") {
-                res[i0 * shape.1..i1 * shape.1]
+            for (i0, a) in task.get_result().expect("Task should be marked `done`") {
+                res[i0..i0 + a.len()]
                     .iter_mut()
-                    .for_each(|r| *r = a);
+                    .zip(a.iter())
+                    .for_each(|(r, a)| {
+                        *r = *a;
+                    });
             }
         }
     }
@@ -718,41 +727,49 @@ mod executor {
         /// the SPMDTask.
         ///
         /// # Limitations (WIP)
-        /// Currently, the task can not close over a value that has no move semantics. The reason is that
-        /// the lifetime of the tasks must be `'static` since the runtime of the threads cannot be inferred
-        /// at compile time, but a captured reference will have a lifetime shorter than `'static`.
-        /// Unsafe code is needed to make that work but requires that the completion of the task is ensured.
-        fn execute<F, W, R>(&self, task: F) -> SPMDTask<W, R>
+        /// To allow the task to close over a value that has no move semantics
+        /// the tasks lifetime is extended to `'static` via the **unsafe** [std::mem::transmute].
+        /// However, this requires that the enclosed references lives at least as long as the task is running.
+        /// This is not guaranteed at the moment. One way to do it (as done in std::thread) is using a scope
+        /// which makes sure that a task is complete before any enclosed reference is dropped.
+        fn execute<'a, F, W, R>(&self, task: F) -> SPMDTask<W, R>
         where
-            F: Fn(W) -> R + Send + Copy + 'static,
+            F: FnOnce(W) -> R + Send + Copy + 'a,
             R: Send + 'static,
             W: Send + 'static,
         {
             let (result_sender, result_recv) = channel::<R>();
             let mut work_sender = Vec::<Sender<W>>::with_capacity(self.nthreads());
-            self // iterate over slice to not consume task_receiver and thereby disconnect all channels.
-                .task_sender
-                .iter()
-                .for_each(|thread| {
-                    // setup channels to send work and receive results
-                    let result_sender = result_sender.clone();
-                    let (ws, work_recv) = channel::<W>();
-                    work_sender.push(ws);
 
-                    let b_task: ThreadTask = Box::new(move || {
-                        for work in work_recv {
-                            result_sender
-                                .send(task(work))
-                                .expect("Should be able to send result from thread.");
-                        }
+            {
+                self // iterate over slice to not consume task_receiver and thereby disconnect all channels.
+                    .task_sender
+                    .iter()
+                    .for_each(|thread| {
+                        // setup channels to send work and receive results
+                        let result_sender = result_sender.clone();
+                        let (ws, work_recv) = channel::<W>();
+                        work_sender.push(ws);
+
+                        let b_task = move || {
+                            for work in work_recv {
+                                result_sender
+                                    .send(task(work))
+                                    .expect("Should be able to send result from thread.");
+                            }
+                        };
+
+                        // copy closure to heap and change its lifetime to 'static
+                        let closure: Box<dyn FnOnce() + Send + 'a> = Box::new(b_task);
+                        let closure: Box<dyn FnOnce() + Send + 'static> =
+                            unsafe { std::mem::transmute(closure) };
+
+                        // send task to thread
+                        thread
+                            .send(closure)
+                            .expect("Should be able to send task to thread");
                     });
-
-                    // send task to thread
-                    thread
-                        .send(b_task)
-                        .expect("Should be able to send task to thread");
-                });
-
+            }
             SPMDTask {
                 work: work_sender,
                 result: result_recv,
