@@ -421,7 +421,7 @@ mod kernel {
 }
 
 mod executor {
-    use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
+    use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
 
@@ -584,6 +584,8 @@ mod executor {
     }
 
     /// WIP Multi-threaded executor based on std::thread using a fixed pool of worker threads.
+    ///
+    /// See limitations of `ThreadPool` on why it is not fully usable yet.
     pub struct ThreadPoolExecutor {
         tp: ThreadPool,
     }
@@ -624,33 +626,18 @@ mod executor {
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            self.tp.execute(
-                move |(i0, i1)| {
-                    ((i0, i1), 1.0)
-                    // let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
-                    // .map(|idx| K::eval(data, idx))
-                    // .collect();
-                    // ((i0 * shape.1, i1 * shape.1), answer)
-                },
-                // |((i0, i1), answer)| {
-                //     res[i0..i1]
-                //         .iter_mut()
-                //         .zip(answer.into_iter())
-                //         .for_each(|(r, a)| *r = a)
-                // },
-                |((i0, i1), _answer)| res[i0..i1].iter_mut().for_each(|r| *r = 1.0 + *r / 2.0),
-                index_range.into_iter(),
-            );
-            // let (work_sender, results) = self.tp.execute(move |sender, receiver| {
-            //     for (i0, i1) in receiver {
-            //         let answer: Vec<Item> = Range2D(i0..i1, 0..shape.1)
-            //             .map(|idx| K::eval(data, idx))
-            //             .collect();
-            //         sender.send(((i0 * shape.1, i1 * shape.1), answer)).unwrap();
-            //     }
-            // });
+            let mut task = self.tp.execute(move |(i0, i1)| ((i0, i1), 1.0));
 
-            // });
+            task.scatter(index_range.into_iter());
+
+            task.done();
+
+            // collect results
+            for ((i0, i1), a) in task.get_result().expect("Task should be marked `done`") {
+                res[i0 * shape.1..i1 * shape.1]
+                    .iter_mut()
+                    .for_each(|r| *r = a);
+            }
         }
     }
 
@@ -712,17 +699,24 @@ mod executor {
             self.handle.len()
         }
 
-        fn execute<F, C, W, R, I>(&self, task: F, mut collector: C, work: I)
+        /// Submit a task of type `Fn(W) -> R` to all workers. The function returns a SPMDTask object
+        /// through which work can be send and results can be received.
+        /// The task will stop to run when its work sender channel is disconnected, e.g. by dropping
+        /// the SPMDTask.
+        ///
+        /// # Limitations (WIP)
+        /// Currently, the task can not close over a value that has no move semantics. The reason is that
+        /// the lifetime of the tasks must be `'static` since the runtime of the threads cannot be inferred
+        /// at compile time, but a captured reference will have a lifetime shorter than `'static`.
+        /// Unsafe code is needed to make that work but requires that the completion of the task is ensured.
+        fn execute<F, W, R>(&self, task: F) -> SPMDTask<W, R>
         where
             F: Fn(W) -> R + Send + Copy + 'static,
-            C: FnMut(R),
             R: Send + 'static,
             W: Send + 'static,
-            I: Iterator<Item = W>,
         {
             let (result_sender, result_recv) = channel::<R>();
             let mut work_sender = Vec::<Sender<W>>::with_capacity(self.nthreads());
-            let (completed_sender, completed_recv) = channel::<Result<(), ()>>();
             self // iterate over slice to not consume task_receiver and thereby disconnect all channels.
                 .task_sender
                 .iter()
@@ -732,17 +726,12 @@ mod executor {
                     let (ws, work_recv) = channel::<W>();
                     work_sender.push(ws);
 
-                    let completed = completed_sender.clone();
-
                     let b_task: ThreadTask = Box::new(move || {
                         for work in work_recv {
                             result_sender
                                 .send(task(work))
                                 .expect("Should be able to send result from thread.");
                         }
-                        completed
-                            .send(Ok(()))
-                            .expect("Should be able to send completed signal from thread.");
                     });
 
                     // send task to thread
@@ -751,28 +740,70 @@ mod executor {
                         .expect("Should be able to send task to thread");
                 });
 
-            // feed workers with tasks
-            let mut msgs = 0;
-            work.zip(work_sender.into_iter().cycle())
-                .for_each(|(work, thread)| {
-                    thread.send(work).unwrap();
-                    msgs += 1;
-                });
-
-            // collect results
-            while msgs != 0 {
-                let res = result_recv.recv().expect("Threads should not panic.");
-                collector(res);
-                msgs -= 1;
+            SPMDTask {
+                work: work_sender,
+                result: result_recv,
             }
+        }
+    }
 
-            // block until all tasks have finished
-            for _ in &self.task_sender {
-                completed_recv
-                    .recv()
-                    .expect("Threads should not panic.")
-                    .expect("Is always Ok");
+    /// A task distributed on a thread pool.
+    ///
+    /// Work from an iterator can be distributed to the thread pool using `scatter`.
+    /// Before collecting the results via `get_results`, the task have to be marked by `done`.
+    ///
+    /// # Example
+    /// ```rust
+    /// // start a thread pool
+    /// let mut task = tp.execute(|i: usize| i + 1);
+    ///
+    /// // Send work to task
+    /// task.scatter(0..10);
+    ///
+    /// // Signal task that no work will be send anymore
+    /// task.done();
+    ///
+    /// let mut res = task
+    ///    .get_result()
+    ///    .expect("task is done")
+    ///    .collect::<Vec<usize>>();
+    /// // we need to sort since the results are unordered
+    /// res.sort();
+    ///
+    /// assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
+    /// ```
+    struct SPMDTask<W, R> {
+        work: Vec<Sender<W>>,
+        result: Receiver<R>,
+    }
+
+    impl<W, R> SPMDTask<W, R> {
+        /// Send work to task
+        fn scatter(&self, work: impl Iterator<Item = W>) {
+            work.zip(self.work.iter().cycle()).for_each(|(w, ws)| {
+                ws.send(w)
+                    .expect("Should be able to send work to SPMDTask.")
+            })
+        }
+
+        /// Return a blocking iterator of unordered result values, but only if there cannot be
+        /// any more work send to the task to prevent a deadlock.
+        fn get_result(&self) -> Result<std::sync::mpsc::Iter<R>, &'static str> {
+            match self.is_done() {
+                true => Ok(self.result.iter()),
+                false => Err("Cannot collect results. SPMDTask not marked as done."),
             }
+        }
+
+        /// Signal tasks that no further work will be submitted
+        fn done(&mut self) {
+            // drop work sender to hang-up channel which stops the task in the thread pool
+            self.work.drain(..);
+        }
+
+        /// Returns `true` if there can still be send work to the task, `false` otherwise.
+        fn is_done(&self) -> bool {
+            self.work.is_empty()
         }
     }
 
@@ -795,6 +826,36 @@ mod executor {
             handle
                 .drain(..)
                 .for_each(|jh| jh.join().expect("Could not join the associated thread."));
+        }
+
+        #[test]
+        fn spmd_task_produces_correct_results() {
+            let tp = ThreadPool::new(2);
+            // let work: Vec<usize> = (0..1000).collect();
+
+            let mut task = tp.execute(|i: usize| i + 1);
+            task.scatter(0..10);
+            task.done();
+            let mut res = task
+                .get_result()
+                .expect("task is done")
+                .collect::<Vec<usize>>();
+
+            // we need to sort since the results are unordered
+            res.sort();
+
+            assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
+        }
+
+        #[test]
+        fn spmd_task_complains_if_task_is_not_done() {
+            let tp = ThreadPool::new(2);
+            // let work: Vec<usize> = (0..1000).collect();
+
+            let task = tp.execute(|i: usize| i + 1);
+
+            // will panic if returning an iterator
+            let _res = task.get_result().unwrap_err();
         }
     }
 }
