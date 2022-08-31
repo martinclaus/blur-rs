@@ -557,27 +557,40 @@ mod executor {
             let shape = res.shape();
             let index_range = Self::split_index_range(nthreads, shape.0);
 
-            let (tx, rv) = channel();
-
             thread::scope(|s| {
+                let (tx, rv) = channel();
                 for (i0, i1) in index_range {
                     let tx = tx.clone();
+                    let (buff_send, buff_recv) = channel();
+
                     s.spawn(move || {
                         for j in i0..i1 {
-                            let mut answer = Vec::<Item>::with_capacity(shape.1);
-                            (0..shape.1).for_each(|i| answer.push(K::eval(data, [j, i])));
-                            tx.send((j, answer)).unwrap();
+                            let mut answer = match buff_recv.try_recv() {
+                                Ok(buff) => buff,
+                                Err(_) => (0..shape.1)
+                                    .map(|_| 0.0)
+                                    .collect::<Vec<Item>>()
+                                    .into_boxed_slice(),
+                            };
+                            (0..shape.1)
+                                .zip(answer.iter_mut())
+                                .for_each(|(i, a)| *a = K::eval(data, [j, i]));
+                            tx.send((j, answer, buff_send.clone())).unwrap();
                         }
                     });
                 }
-                for _ in 0..shape.0 {
-                    let (j, answer) = rv.recv().unwrap();
+
+                // Need to drop tx to finally hang-up the result channel so that we an iterate over it.
+                drop(tx);
+
+                for (j, answer, return_buff) in rv {
                     res[j * shape.1..(j + 1) * shape.1]
                         .iter_mut()
-                        .zip(answer)
+                        .zip(answer.iter())
                         .for_each(|(r, a)| {
-                            *r = a;
-                        })
+                            *r = *a;
+                        });
+                    return_buff.send(answer).err();
                 }
             });
         }
