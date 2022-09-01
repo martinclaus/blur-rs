@@ -639,7 +639,7 @@ mod executor {
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            let mut task = self.tp.execute(move |(i0, i1), buff: Option<Box<[f64]>>| {
+            let task = move |(i0, i1), buff: Option<Box<[f64]>>| {
                 let answer = match buff {
                     Some(mut buff) => {
                         Range2D(i0..i1, 0..shape.1)
@@ -653,7 +653,9 @@ mod executor {
                         .into_boxed_slice(),
                 };
                 (i0 * shape.1, answer)
-            });
+            };
+
+            let mut task = self.tp.execute(task);
 
             task.scatter(index_range.into_iter());
 
