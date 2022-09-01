@@ -880,13 +880,13 @@ mod executor {
             let tp = ThreadPool::new(2);
             // let work: Vec<usize> = (0..1000).collect();
 
-            let mut task = tp.execute(|i: usize, buff: Option<()>| i + 1);
+            let mut task = tp.execute(|i: usize, _buff: Option<()>| i + 1);
             task.scatter(0..10);
             task.done();
             let mut res = task
                 .get_result()
                 .expect("task is done")
-                .map(|(r, s)| r)
+                .map(|(r, _)| r)
                 .collect::<Vec<usize>>();
 
             // we need to sort since the results are unordered
@@ -900,7 +900,7 @@ mod executor {
             let tp = ThreadPool::new(2);
             // let work: Vec<usize> = (0..1000).collect();
 
-            let task = tp.execute(|i: usize, buff: Option<()>| i + 1);
+            let task = tp.execute(|i: usize, _buff: Option<()>| i + 1);
 
             // will panic if returning an iterator
             let _res = task.get_result().unwrap_err();
