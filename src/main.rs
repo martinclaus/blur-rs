@@ -639,11 +639,19 @@ mod executor {
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            let mut task = self.tp.execute(move |(i0, i1)| {
-                let answer = Range2D(i0..i1, 0..shape.1)
-                    .map(|idx| K::eval(data, idx))
-                    .collect::<Vec<Item>>()
-                    .into_boxed_slice();
+            let mut task = self.tp.execute(move |(i0, i1), buff: Option<Box<[f64]>>| {
+                let answer = match buff {
+                    Some(mut buff) => {
+                        Range2D(i0..i1, 0..shape.1)
+                            .zip(buff.iter_mut())
+                            .for_each(|(idx, r)| *r = K::eval(data, idx));
+                        buff
+                    }
+                    None => Range2D(i0..i1, 0..shape.1)
+                        .map(|idx| K::eval(data, idx))
+                        .collect::<Vec<Item>>()
+                        .into_boxed_slice(),
+                };
                 (i0 * shape.1, answer)
             });
 
@@ -652,13 +660,15 @@ mod executor {
             task.done();
 
             // collect results
-            for (i0, a) in task.get_result().expect("Task should be marked `done`") {
+            for ((i0, a), buff_sender) in task.get_result().expect("Task should be marked `done`") {
                 res[i0..i0 + a.len()]
                     .iter_mut()
                     .zip(a.iter())
                     .for_each(|(r, a)| {
                         *r = *a;
                     });
+                // allow for failure since channel is hung-up when worker are finished
+                buff_sender.send(a).err();
             }
         }
     }
@@ -732,13 +742,14 @@ mod executor {
         /// However, this requires that the enclosed references lives at least as long as the task is running.
         /// This is not guaranteed at the moment. One way to do it (as done in std::thread) is using a scope
         /// which makes sure that a task is complete before any enclosed reference is dropped.
-        fn execute<'a, F, W, R>(&self, task: F) -> SPMDTask<W, R>
+        fn execute<'a, F, W, R, RB>(&self, task: F) -> SPMDTask<W, R, RB>
         where
-            F: FnOnce(W) -> R + Send + Copy + 'a,
+            F: FnOnce(W, Option<RB>) -> R + Send + Copy + 'a,
             R: Send + 'static,
+            RB: Send + 'static,
             W: Send + 'static,
         {
-            let (result_sender, result_recv) = channel::<R>();
+            let (result_sender, result_recv) = channel::<(R, Sender<RB>)>();
             let mut work_sender = Vec::<Sender<W>>::with_capacity(self.nthreads());
 
             {
@@ -751,10 +762,14 @@ mod executor {
                         let (ws, work_recv) = channel::<W>();
                         work_sender.push(ws);
 
+                        // setup channels to exchange result buffer
+                        let (buff_send, buff_recv) = channel::<RB>();
+
                         let b_task = move || {
                             for work in work_recv {
+                                let buff = buff_recv.try_recv().ok();
                                 result_sender
-                                    .send(task(work))
+                                    .send((task(work, buff), buff_send.clone()))
                                     .expect("Should be able to send result from thread.");
                             }
                         };
@@ -804,12 +819,12 @@ mod executor {
     ///
     /// assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
     /// ```
-    struct SPMDTask<W, R> {
+    struct SPMDTask<W, R, RB> {
         work: Vec<Sender<W>>,
-        result: Receiver<R>,
+        result: Receiver<(R, Sender<RB>)>,
     }
 
-    impl<W, R> SPMDTask<W, R> {
+    impl<W, R, RB> SPMDTask<W, R, RB> {
         /// Send work to task
         fn scatter(&self, work: impl Iterator<Item = W>) {
             work.zip(self.work.iter().cycle()).for_each(|(w, ws)| {
@@ -820,7 +835,7 @@ mod executor {
 
         /// Return a blocking iterator of unordered result values, but only if there cannot be
         /// any more work send to the task to prevent a deadlock.
-        fn get_result(&self) -> Result<std::sync::mpsc::Iter<R>, &'static str> {
+        fn get_result(&self) -> Result<std::sync::mpsc::Iter<(R, Sender<RB>)>, &'static str> {
             match self.is_done() {
                 true => Ok(self.result.iter()),
                 false => Err("Cannot collect results. SPMDTask not marked as done."),
@@ -865,12 +880,13 @@ mod executor {
             let tp = ThreadPool::new(2);
             // let work: Vec<usize> = (0..1000).collect();
 
-            let mut task = tp.execute(|i: usize| i + 1);
+            let mut task = tp.execute(|i: usize, buff: Option<()>| i + 1);
             task.scatter(0..10);
             task.done();
             let mut res = task
                 .get_result()
                 .expect("task is done")
+                .map(|(r, s)| r)
                 .collect::<Vec<usize>>();
 
             // we need to sort since the results are unordered
@@ -884,7 +900,7 @@ mod executor {
             let tp = ThreadPool::new(2);
             // let work: Vec<usize> = (0..1000).collect();
 
-            let task = tp.execute(|i: usize| i + 1);
+            let task = tp.execute(|i: usize, buff: Option<()>| i + 1);
 
             // will panic if returning an iterator
             let _res = task.get_result().unwrap_err();
