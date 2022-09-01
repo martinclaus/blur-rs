@@ -760,6 +760,8 @@ mod executor {
                         };
 
                         // copy closure to heap and change its lifetime to 'static
+                        // see https://github.com/crossbeam-rs/crossbeam/blob/70700182c4c92c393fc76209c7acad7af69dca21/crossbeam-utils/src/thread.rs#L445-L446
+                        // for a comparison with the implementation in crossbeam
                         let closure: Box<dyn FnOnce() + Send + 'a> = Box::new(b_task);
                         let closure: Box<dyn FnOnce() + Send + 'static> =
                             unsafe { std::mem::transmute(closure) };
