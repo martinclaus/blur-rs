@@ -660,16 +660,16 @@ mod executor {
             task.done();
 
             // collect results
-            for ((i0, a), buff_sender) in task.get_result().expect("Task should be marked `done`") {
+            task.get_result(|(i0, a)| {
                 res[i0..i0 + a.len()]
                     .iter_mut()
                     .zip(a.iter())
                     .for_each(|(r, a)| {
                         *r = *a;
                     });
-                // allow for failure since channel is hung-up when worker are finished
-                buff_sender.send(a).err();
-            }
+                a
+            })
+            .expect("Should be able to receive results if task is marked done.");
         }
     }
 
@@ -835,10 +835,20 @@ mod executor {
 
         /// Return a blocking iterator of unordered result values, but only if there cannot be
         /// any more work send to the task to prevent a deadlock.
-        fn get_result(&self) -> Result<std::sync::mpsc::Iter<(R, Sender<RB>)>, &'static str> {
+        fn get_result<F>(&self, mut f: F) -> Result<(), &'static str>
+        where
+            F: FnMut(R) -> RB,
+        {
             match self.is_done() {
-                true => Ok(self.result.iter()),
                 false => Err("Cannot collect results. SPMDTask not marked as done."),
+                true => {
+                    // let f = Box::<dyn FnOnce(R) -> RB>::new(move |r| f(r));
+                    for (res, buff_sender) in self.result.iter() {
+                        // allow to fail since task may be completed and receiving ends are dropped
+                        buff_sender.send(f(res)).err();
+                    }
+                    Ok(())
+                }
             }
         }
 
@@ -880,17 +890,19 @@ mod executor {
             let tp = ThreadPool::new(2);
             // let work: Vec<usize> = (0..1000).collect();
 
-            let mut task = tp.execute(|i: usize, _buff: Option<()>| i + 1);
+            let mut task = tp.execute(|i: usize, _buff: Option<()>| (i, i + 1));
             task.scatter(0..10);
+
             task.done();
-            let mut res = task
-                .get_result()
-                .expect("task is done")
-                .map(|(r, _)| r)
-                .collect::<Vec<usize>>();
+
+            let mut res = [0; 10];
+            task.get_result(|(i, r)| {
+                res[i] = r;
+            })
+            .expect("task is done");
 
             // we need to sort since the results are unordered
-            res.sort();
+            // res.sort();
 
             assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
         }
@@ -903,7 +915,7 @@ mod executor {
             let task = tp.execute(|i: usize, _buff: Option<()>| i + 1);
 
             // will panic if returning an iterator
-            let _res = task.get_result().unwrap_err();
+            let _res = task.get_result(|_| {}).unwrap_err();
         }
     }
 }
