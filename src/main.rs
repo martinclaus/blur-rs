@@ -565,9 +565,9 @@ mod executor {
 
     impl Executor for ThreadChannelExecutor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
-            let nthreads = 8;
+            let nthreads: usize = 8;
             let shape = res.shape();
-            let index_range = Self::split_index_range(nthreads, shape.0);
+            let index_range = Self::split_index_range(nthreads.checked_sub(1).unwrap(), shape.0);
 
             thread::scope(|s| {
                 let (res_sender, res_recv) = channel();
