@@ -592,9 +592,6 @@ mod executor {
                     });
                 }
 
-                // Need drop to finally hang-up the result channel so that we an iterate over it.
-                drop(res_sender);
-
                 s.spawn(move || {
                     res_recv.into_iter().for_each(|(j, answer, return_buff)| {
                         res[j * shape.1..(j + 1) * shape.1]
