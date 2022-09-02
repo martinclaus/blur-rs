@@ -103,6 +103,14 @@ mod data_type {
     /// This objects offers an iterator over indices.
     pub struct Range2D(pub Range1D, pub Range1D);
 
+    impl Range2D {
+        pub fn par_iter(&self) -> rayon::vec::IntoIter<Ix2> {
+            Range2D(self.0.start..self.0.end, self.1.start..self.1.end)
+                .collect::<Vec<_>>()
+                .into_par_iter()
+        }
+    }
+
     impl From<Shape2D> for Range2D {
         /// Convert a Shape2D into a Range over all indices.
         #[inline]
@@ -162,6 +170,10 @@ mod data_type {
         #[inline]
         pub fn usize_into_index(&self, i: usize) -> Ix2 {
             [i / self.1, i % self.1]
+        }
+
+        pub fn par_iter(&self) -> rayon::vec::IntoIter<Ix2> {
+            Range2D::from(*self).par_iter()
         }
     }
 
@@ -903,16 +915,12 @@ mod executor {
             })
             .expect("task is done");
 
-            // we need to sort since the results are unordered
-            // res.sort();
-
             assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
         }
 
         #[test]
         fn spmd_task_complains_if_task_is_not_done() {
             let tp = ThreadPool::new(2);
-            // let work: Vec<usize> = (0..1000).collect();
 
             let task = tp.execute(|i: usize, _buff: Option<()>| i + 1);
 
