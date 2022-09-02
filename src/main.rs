@@ -570,9 +570,9 @@ mod executor {
             let index_range = Self::split_index_range(nthreads, shape.0);
 
             thread::scope(|s| {
-                let (tx, rv) = channel();
+                let (res_sender, res_recv) = channel();
                 for (i0, i1) in index_range {
-                    let tx = tx.clone();
+                    let res_sender = res_sender.clone();
                     let (buff_send, buff_recv) = channel();
 
                     s.spawn(move || {
@@ -587,23 +587,25 @@ mod executor {
                             (0..shape.1)
                                 .zip(answer.iter_mut())
                                 .for_each(|(i, a)| *a = K::eval(data, [j, i]));
-                            tx.send((j, answer, buff_send.clone())).unwrap();
+                            res_sender.send((j, answer, buff_send.clone())).unwrap();
                         }
                     });
                 }
 
-                // Need to drop tx to finally hang-up the result channel so that we an iterate over it.
-                drop(tx);
+                // Need drop to finally hang-up the result channel so that we an iterate over it.
+                drop(res_sender);
 
-                for (j, answer, return_buff) in rv {
-                    res[j * shape.1..(j + 1) * shape.1]
-                        .iter_mut()
-                        .zip(answer.iter())
-                        .for_each(|(r, a)| {
-                            *r = *a;
-                        });
-                    return_buff.send(answer).err();
-                }
+                s.spawn(move || {
+                    res_recv.into_iter().for_each(|(j, answer, return_buff)| {
+                        res[j * shape.1..(j + 1) * shape.1]
+                            .iter_mut()
+                            .zip(answer.iter())
+                            .for_each(|(r, a)| {
+                                *r = *a;
+                            });
+                        return_buff.send(answer).err();
+                    });
+                });
             });
         }
     }
