@@ -570,28 +570,28 @@ mod executor {
 
             thread::scope(|s| {
                 let index_range =
-                    Self::split_index_range(nthreads.checked_sub(1).unwrap(), shape.0);
+                    Self::split_index_range((2 * nthreads).checked_sub(1).unwrap(), shape.0);
                 let mut task = SPMDTask::new(
-                    |(j0, j1), buff| {
-                        // for j in j0..j1 {
-                        let mut answer = match buff {
-                            Some((_, buff)) => buff,
-                            None => (0..(j1 - j0) * shape.1)
-                                .map(|_| 0.0)
+                    |j, buff: Option<(usize, Box<[f64]>)>| {
+                        let answer = match buff {
+                            Some((_, mut buff)) => {
+                                (0..shape.1)
+                                    .zip(buff.iter_mut())
+                                    .for_each(|(i, a)| *a = K::eval(data, [j, i]));
+                                buff
+                            }
+                            None => (0..shape.1)
+                                .map(|i| K::eval(data, [j, i]))
                                 .collect::<Vec<Item>>()
                                 .into_boxed_slice(),
                         };
-                        Range2D(j0..j1, 0..shape.1)
-                            .zip(answer.iter_mut())
-                            .for_each(|(i, a)| *a = K::eval(data, i));
-                        (j0, answer)
-                        // }
+                        (j, answer)
                     },
                     s,
                     nthreads,
                 );
 
-                task.scatter(index_range.into_iter());
+                task.scatter(index_range.into_iter().map(|(j0, j1)| j0..j1));
                 task.done();
                 task.get_result(|(j, buff)| {
                     res[j * shape.1..j * shape.1 + buff.len()]
@@ -647,25 +647,25 @@ mod executor {
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            let task = move |(i0, i1), buff: Option<(usize, Box<[f64]>)>| {
+            let task = move |j, buff: Option<(usize, Box<[f64]>)>| {
                 let answer = match buff {
                     Some((_, mut buff)) => {
-                        Range2D(i0..i1, 0..shape.1)
+                        (0..shape.1)
                             .zip(buff.iter_mut())
-                            .for_each(|(idx, r)| *r = K::eval(data, idx));
+                            .for_each(|(i, r)| *r = K::eval(data, [j, i]));
                         buff
                     }
-                    None => Range2D(i0..i1, 0..shape.1)
-                        .map(|idx| K::eval(data, idx))
+                    None => (0..shape.1)
+                        .map(|i| K::eval(data, [j, i]))
                         .collect::<Vec<Item>>()
                         .into_boxed_slice(),
                 };
-                (i0 * shape.1, answer)
+                (j * shape.1, answer)
             };
 
             let mut task = self.tp.execute(task);
 
-            task.scatter(index_range.into_iter());
+            task.scatter(index_range.into_iter().map(|(j0, j1)| j0..j1));
 
             task.done();
 
@@ -751,14 +751,15 @@ mod executor {
         /// However, this requires that the enclosed references lives at least as long as the task is running.
         /// This is not guaranteed at the moment. One way to do it (as done in std::thread) is using a scope
         /// which makes sure that a task is complete before any enclosed reference is dropped.
-        fn execute<'a, F, W, R>(&self, task: F) -> SPMDTask<W, R>
+        fn execute<'a, F, W, R, WI>(&self, task: F) -> SPMDTask<R, WI>
         where
             F: FnOnce(W, Option<R>) -> R + Send + Copy + 'a,
             R: Send + 'static,
             W: Send + 'static,
+            WI: Iterator<Item = W> + Send,
         {
             let (result_sender, result_recv) = channel::<(R, Sender<R>)>();
-            let mut work_sender = Vec::<Sender<W>>::with_capacity(self.nthreads());
+            let mut work_sender = Vec::<Sender<WI>>::with_capacity(self.nthreads());
 
             {
                 self // iterate over slice to not consume task_receiver and thereby disconnect all channels.
@@ -767,18 +768,20 @@ mod executor {
                     .for_each(|thread| {
                         // setup channels to send work and receive results
                         let result_sender = result_sender.clone();
-                        let (ws, work_recv) = channel::<W>();
+                        let (ws, work_recv) = channel::<WI>();
                         work_sender.push(ws);
 
                         // setup channels to exchange result buffer
                         let (buff_send, buff_recv) = channel::<R>();
 
                         let b_task = move || {
-                            for work in work_recv {
-                                let buff = buff_recv.try_recv().ok();
-                                result_sender
-                                    .send((task(work, buff), buff_send.clone()))
-                                    .expect("Should be able to send result from thread.");
+                            for work_chunk in work_recv {
+                                for work in work_chunk {
+                                    let buff = buff_recv.try_recv().ok();
+                                    result_sender
+                                        .send((task(work, buff), buff_send.clone()))
+                                        .expect("Should be able to send result from thread.");
+                                }
                             }
                         };
 
@@ -827,18 +830,19 @@ mod executor {
     ///
     /// assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
     /// ```
-    struct SPMDTask<W, R> {
-        work: Vec<Sender<W>>,
+    struct SPMDTask<R, WI> {
+        work: Vec<Sender<WI>>,
         result: Receiver<(R, Sender<R>)>,
     }
 
-    impl<W, R> SPMDTask<W, R> {
+    impl<R, WI> SPMDTask<R, WI> {
         /// create a SPMD task which spawns it own threads within a thread scope
-        fn new<'scope, F>(f: F, scope: &'scope Scope<'scope, '_>, n_threads: usize) -> Self
+        fn new<'scope, F, W>(f: F, scope: &'scope Scope<'scope, '_>, n_threads: usize) -> Self
         where
             F: FnOnce(W, Option<R>) -> R + Send + Copy + 'scope,
-            W: Send + 'scope,
+            // W: Send + 'scope,
             R: Send + 'scope,
+            WI: Iterator<Item = W> + Send + 'scope,
         {
             let n_worker = n_threads
                 .checked_sub(1)
@@ -848,7 +852,7 @@ mod executor {
             let (res_sender, res_recv) = channel();
 
             // Spawn task on worker and collect channels to send work to them
-            let work_sender: Vec<Sender<W>> = (0..n_worker)
+            let work_sender: Vec<Sender<WI>> = (0..n_worker)
                 .map(|_| {
                     let (buff_send, buff_recv) = channel();
                     let (work_sender, work_receiver) = channel();
@@ -856,11 +860,13 @@ mod executor {
                     let res_sender = res_sender.clone();
                     scope.spawn(move || {
                         for work in work_receiver {
-                            let buff = buff_recv.try_recv().ok();
-                            let res = f(work, buff);
-                            res_sender
-                                .send((res, buff_send.clone()))
-                                .expect("Result receiver should not be disconnected.")
+                            for work_chunk in work {
+                                let buff = buff_recv.try_recv().ok();
+                                let res = f(work_chunk, buff);
+                                res_sender
+                                    .send((res, buff_send.clone()))
+                                    .expect("Result receiver should not be disconnected.")
+                            }
                         }
                     });
                     work_sender
@@ -874,15 +880,14 @@ mod executor {
         }
 
         /// Send work to task
-        fn scatter(&self, work: impl Iterator<Item = W>) {
+        fn scatter(&self, work: impl Iterator<Item = WI>) {
             work.zip(self.work.iter().cycle()).for_each(|(w, ws)| {
                 ws.send(w)
                     .expect("Should be able to send work to SPMDTask.")
             })
         }
 
-        /// Return a blocking iterator of unordered result values, but only if there cannot be
-        /// any more work send to the task to prevent a deadlock.
+        /// Spawn thread to collect results and do something with it.
         fn get_result<F>(&self, mut f: F) -> Result<(), &'static str>
         where
             F: FnMut(&R),
@@ -890,7 +895,6 @@ mod executor {
             match self.is_done() {
                 false => Err("Cannot collect results. SPMDTask not marked as done."),
                 true => {
-                    // let f = Box::<dyn FnOnce(R) -> RB>::new(move |r| f(r));
                     for (res, buff_sender) in self.result.iter() {
                         f(&res);
                         // Return result buffer to worker. Allow to fail since task may be completed and receiving ends are dropped.
@@ -916,7 +920,9 @@ mod executor {
     #[cfg(test)]
     mod test {
 
-        use super::ThreadPool;
+        use std::slice::Iter;
+
+        use super::{SPMDTask, ThreadPool};
 
         #[test]
         fn thread_pool_stops_threads_on_drop() {
@@ -940,7 +946,7 @@ mod executor {
             // let work: Vec<usize> = (0..1000).collect();
 
             let mut task = tp.execute(|i: usize, _buff: Option<(usize, usize)>| (i, i + 1));
-            task.scatter(0..10);
+            task.scatter((0..2).map(|i| i * 5..(i + 1) * 5));
 
             task.done();
 
@@ -957,7 +963,8 @@ mod executor {
         fn spmd_task_complains_if_task_is_not_done() {
             let tp = ThreadPool::new(2);
 
-            let task = tp.execute(|i: usize, _buff: Option<usize>| i + 1);
+            let task: SPMDTask<usize, Iter<usize>> =
+                tp.execute(|i: &usize, _buff: Option<usize>| i + 1);
 
             // will panic if returning an iterator
             let _res = task.get_result(|_| {}).unwrap_err();
