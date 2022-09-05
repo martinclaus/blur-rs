@@ -435,7 +435,7 @@ mod kernel {
 mod executor {
     use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
     use std::sync::{Arc, Mutex};
-    use std::thread::{self, JoinHandle};
+    use std::thread::{self, JoinHandle, Scope};
 
     use crate::data_type::{Arr2D, Item, Range2D};
     use crate::kernel::Kernel;
@@ -567,42 +567,39 @@ mod executor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads: usize = 8;
             let shape = res.shape();
-            let index_range = Self::split_index_range(nthreads.checked_sub(1).unwrap(), shape.0);
 
             thread::scope(|s| {
-                let (res_sender, res_recv) = channel();
-                for (i0, i1) in index_range {
-                    let res_sender = res_sender.clone();
-                    let (buff_send, buff_recv) = channel();
+                let index_range =
+                    Self::split_index_range(nthreads.checked_sub(1).unwrap(), shape.0);
+                let mut task = SPMDTask::new(
+                    |(j0, j1), buff| {
+                        // for j in j0..j1 {
+                        let mut answer = match buff {
+                            Some((_, buff)) => buff,
+                            None => (0..(j1 - j0) * shape.1)
+                                .map(|_| 0.0)
+                                .collect::<Vec<Item>>()
+                                .into_boxed_slice(),
+                        };
+                        Range2D(j0..j1, 0..shape.1)
+                            .zip(answer.iter_mut())
+                            .for_each(|(i, a)| *a = K::eval(data, i));
+                        (j0, answer)
+                        // }
+                    },
+                    s,
+                    nthreads,
+                );
 
-                    s.spawn(move || {
-                        for j in i0..i1 {
-                            let mut answer = match buff_recv.try_recv() {
-                                Ok(buff) => buff,
-                                Err(_) => (0..shape.1)
-                                    .map(|_| 0.0)
-                                    .collect::<Vec<Item>>()
-                                    .into_boxed_slice(),
-                            };
-                            (0..shape.1)
-                                .zip(answer.iter_mut())
-                                .for_each(|(i, a)| *a = K::eval(data, [j, i]));
-                            res_sender.send((j, answer, buff_send.clone())).unwrap();
-                        }
-                    });
-                }
-
-                s.spawn(move || {
-                    res_recv.into_iter().for_each(|(j, answer, return_buff)| {
-                        res[j * shape.1..(j + 1) * shape.1]
-                            .iter_mut()
-                            .zip(answer.iter())
-                            .for_each(|(r, a)| {
-                                *r = *a;
-                            });
-                        return_buff.send(answer).err();
-                    });
-                });
+                task.scatter(index_range.into_iter());
+                task.done();
+                task.get_result(|(j, buff)| {
+                    res[j * shape.1..j * shape.1 + buff.len()]
+                        .iter_mut()
+                        .zip(buff.iter())
+                        .for_each(|(r, a)| *r = *a)
+                })
+                .expect("Task should be done");
             });
         }
     }
@@ -650,9 +647,9 @@ mod executor {
             let nchunks = nthreads * 5;
             let index_range = Self::split_index_range(nchunks, shape.0);
 
-            let task = move |(i0, i1), buff: Option<Box<[f64]>>| {
+            let task = move |(i0, i1), buff: Option<(usize, Box<[f64]>)>| {
                 let answer = match buff {
-                    Some(mut buff) => {
+                    Some((_, mut buff)) => {
                         Range2D(i0..i1, 0..shape.1)
                             .zip(buff.iter_mut())
                             .for_each(|(idx, r)| *r = K::eval(data, idx));
@@ -674,13 +671,12 @@ mod executor {
 
             // collect results
             task.get_result(|(i0, a)| {
-                res[i0..i0 + a.len()]
+                res[*i0..i0 + a.len()]
                     .iter_mut()
                     .zip(a.iter())
                     .for_each(|(r, a)| {
                         *r = *a;
                     });
-                a
             })
             .expect("Should be able to receive results if task is marked done.");
         }
@@ -755,14 +751,13 @@ mod executor {
         /// However, this requires that the enclosed references lives at least as long as the task is running.
         /// This is not guaranteed at the moment. One way to do it (as done in std::thread) is using a scope
         /// which makes sure that a task is complete before any enclosed reference is dropped.
-        fn execute<'a, F, W, R, RB>(&self, task: F) -> SPMDTask<W, R, RB>
+        fn execute<'a, F, W, R>(&self, task: F) -> SPMDTask<W, R>
         where
-            F: FnOnce(W, Option<RB>) -> R + Send + Copy + 'a,
+            F: FnOnce(W, Option<R>) -> R + Send + Copy + 'a,
             R: Send + 'static,
-            RB: Send + 'static,
             W: Send + 'static,
         {
-            let (result_sender, result_recv) = channel::<(R, Sender<RB>)>();
+            let (result_sender, result_recv) = channel::<(R, Sender<R>)>();
             let mut work_sender = Vec::<Sender<W>>::with_capacity(self.nthreads());
 
             {
@@ -776,7 +771,7 @@ mod executor {
                         work_sender.push(ws);
 
                         // setup channels to exchange result buffer
-                        let (buff_send, buff_recv) = channel::<RB>();
+                        let (buff_send, buff_recv) = channel::<R>();
 
                         let b_task = move || {
                             for work in work_recv {
@@ -832,12 +827,52 @@ mod executor {
     ///
     /// assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
     /// ```
-    struct SPMDTask<W, R, RB> {
+    struct SPMDTask<W, R> {
         work: Vec<Sender<W>>,
-        result: Receiver<(R, Sender<RB>)>,
+        result: Receiver<(R, Sender<R>)>,
     }
 
-    impl<W, R, RB> SPMDTask<W, R, RB> {
+    impl<W, R> SPMDTask<W, R> {
+        /// create a SPMD task which spawns it own threads within a thread scope
+        fn new<'scope, F>(f: F, scope: &'scope Scope<'scope, '_>, n_threads: usize) -> Self
+        where
+            F: FnOnce(W, Option<R>) -> R + Send + Copy + 'scope,
+            W: Send + 'scope,
+            R: Send + 'scope,
+        {
+            let n_worker = n_threads
+                .checked_sub(1)
+                .expect("n_threads should be larger than 0.");
+
+            // setup channel between workers and collector thread
+            let (res_sender, res_recv) = channel();
+
+            // Spawn task on worker and collect channels to send work to them
+            let work_sender: Vec<Sender<W>> = (0..n_worker)
+                .map(|_| {
+                    let (buff_send, buff_recv) = channel();
+                    let (work_sender, work_receiver) = channel();
+
+                    let res_sender = res_sender.clone();
+                    scope.spawn(move || {
+                        for work in work_receiver {
+                            let buff = buff_recv.try_recv().ok();
+                            let res = f(work, buff);
+                            res_sender
+                                .send((res, buff_send.clone()))
+                                .expect("Result receiver should not be disconnected.")
+                        }
+                    });
+                    work_sender
+                })
+                .collect();
+
+            SPMDTask {
+                work: work_sender,
+                result: res_recv,
+            }
+        }
+
         /// Send work to task
         fn scatter(&self, work: impl Iterator<Item = W>) {
             work.zip(self.work.iter().cycle()).for_each(|(w, ws)| {
@@ -850,15 +885,16 @@ mod executor {
         /// any more work send to the task to prevent a deadlock.
         fn get_result<F>(&self, mut f: F) -> Result<(), &'static str>
         where
-            F: FnMut(R) -> RB,
+            F: FnMut(&R),
         {
             match self.is_done() {
                 false => Err("Cannot collect results. SPMDTask not marked as done."),
                 true => {
                     // let f = Box::<dyn FnOnce(R) -> RB>::new(move |r| f(r));
                     for (res, buff_sender) in self.result.iter() {
-                        // allow to fail since task may be completed and receiving ends are dropped
-                        buff_sender.send(f(res)).err();
+                        f(&res);
+                        // Return result buffer to worker. Allow to fail since task may be completed and receiving ends are dropped.
+                        buff_sender.send(res).err();
                     }
                     Ok(())
                 }
@@ -903,14 +939,14 @@ mod executor {
             let tp = ThreadPool::new(2);
             // let work: Vec<usize> = (0..1000).collect();
 
-            let mut task = tp.execute(|i: usize, _buff: Option<()>| (i, i + 1));
+            let mut task = tp.execute(|i: usize, _buff: Option<(usize, usize)>| (i, i + 1));
             task.scatter(0..10);
 
             task.done();
 
             let mut res = [0; 10];
             task.get_result(|(i, r)| {
-                res[i] = r;
+                res[*i] = *r;
             })
             .expect("task is done");
 
@@ -921,7 +957,7 @@ mod executor {
         fn spmd_task_complains_if_task_is_not_done() {
             let tp = ThreadPool::new(2);
 
-            let task = tp.execute(|i: usize, _buff: Option<()>| i + 1);
+            let task = tp.execute(|i: usize, _buff: Option<usize>| i + 1);
 
             // will panic if returning an iterator
             let _res = task.get_result(|_| {}).unwrap_err();
