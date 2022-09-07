@@ -433,6 +433,7 @@ mod kernel {
 }
 
 mod executor {
+    use std::ops::Range;
     use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle, Scope};
@@ -474,6 +475,28 @@ mod executor {
                 *out = K::eval(data, shape.usize_into_index(i));
             });
         }
+    }
+
+    /// Returns an iterator of `n_chunks` evenly long sub-ranges
+    fn split_index_range(n_chunks: usize, range: Range<usize>) -> std::vec::IntoIter<Range<usize>> {
+        let mut index_range = vec![];
+        let step = range.len() / n_chunks;
+        let mut remainder = range.len() % n_chunks;
+        let mut start_i0 = vec![range.start];
+        let mut next = range.start;
+        for _ in 0..n_chunks - 1 {
+            if let Some(&last) = start_i0.last() {
+                next = last + step;
+                if remainder != 0 {
+                    next += 1;
+                    remainder -= 1;
+                }
+                index_range.push(last..next);
+                start_i0.push(next);
+            }
+        }
+        index_range.push(next..range.end);
+        index_range.into_iter()
     }
 
     /// Multi-threaded executor based on std::thread.
@@ -540,29 +563,6 @@ mod executor {
     /// but requires an allocation per sended result.
     pub struct ThreadChannelExecutor;
 
-    impl ThreadChannelExecutor {
-        fn split_index_range(nthreads: usize, len: usize) -> Vec<(usize, usize)> {
-            let mut index_range = vec![];
-            let step = len / nthreads;
-            let mut remainder = len % nthreads;
-            let mut start_i0 = vec![0];
-            let mut next = 0;
-            for _ in 0..nthreads - 1 {
-                if let Some(last) = start_i0.last() {
-                    next = last + step;
-                    if remainder != 0 {
-                        next += 1;
-                        remainder -= 1;
-                    }
-                    index_range.push((*last, next));
-                    start_i0.push(next);
-                }
-            }
-            index_range.push((next, len));
-            index_range
-        }
-    }
-
     impl Executor for ThreadChannelExecutor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads: usize = 8;
@@ -570,7 +570,7 @@ mod executor {
 
             thread::scope(|s| {
                 let index_range =
-                    Self::split_index_range((2 * nthreads).checked_sub(1).unwrap(), shape.0);
+                    split_index_range((2 * nthreads).checked_sub(1).unwrap(), 0..shape.0);
                 let mut task = SPMDTask::new(
                     |j, buff: Option<(usize, Box<[f64]>)>| {
                         let answer = match buff {
@@ -591,7 +591,7 @@ mod executor {
                     nthreads,
                 );
 
-                task.scatter(index_range.into_iter().map(|(j0, j1)| j0..j1));
+                task.scatter(index_range);
                 task.done();
                 task.get_result(|(j, buff)| {
                     res[j * shape.1..j * shape.1 + buff.len()]
@@ -840,7 +840,6 @@ mod executor {
         fn new<'scope, F, W>(f: F, scope: &'scope Scope<'scope, '_>, n_threads: usize) -> Self
         where
             F: FnOnce(W, Option<R>) -> R + Send + Copy + 'scope,
-            // W: Send + 'scope,
             R: Send + 'scope,
             WI: Iterator<Item = W> + Send + 'scope,
         {
