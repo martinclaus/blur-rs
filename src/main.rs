@@ -208,6 +208,14 @@ mod data_type {
             self.shape
         }
 
+        pub(crate) fn as_raw(&self) -> &Box<[f64]> {
+            &self.data
+        }
+
+        pub(crate) fn as_mut_raw(&mut self) -> &mut Box<[f64]> {
+            &mut self.data
+        }
+
         /// Return an iterator over all elements of the array.
         ///
         /// This iterator is a flat iterator and its order is row-major.
@@ -434,8 +442,8 @@ mod kernel {
 
 mod executor {
     use std::ops::Range;
+    use std::slice::from_raw_parts_mut;
     use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
-    use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle, Scope};
 
     use crate::data_type::{Arr2D, Item, Range2D};
@@ -507,25 +515,41 @@ mod executor {
     pub struct ThreadSharedMutableStateExecutor;
 
     impl ThreadSharedMutableStateExecutor {
-        fn split_index_range(nthreads: usize, len: usize) -> Vec<(usize, usize)> {
-            let mut index_range = vec![];
-            let step = len / nthreads;
-            let mut remainder = len % nthreads;
-            let mut start_i0 = vec![0];
-            let mut next = 0;
-            for _ in 0..nthreads - 1 {
-                if let Some(last) = start_i0.last() {
-                    next = last + step;
-                    if remainder != 0 {
-                        next += 1;
-                        remainder -= 1;
-                    }
-                    index_range.push((*last, next));
-                    start_i0.push(next);
-                }
-            }
-            index_range.push((next, len));
-            index_range
+        /// Build an iterator of ranges over the first dimension of an Arr2D and associated
+        /// mutable references to the respective data.
+        ///
+        /// The function will panic if `start_idx` is not monotonic increasing.
+        ///
+        /// # Safety
+        /// The referenced slices need to be disjunct. Additional safety requirements are
+        /// given by [`std::slice::from_raw_parts`].
+        unsafe fn split_mut<'a>(
+            data: &'a mut Arr2D,
+            start_idx: &[usize],
+        ) -> std::vec::IntoIter<(Range<usize>, &'a mut [Item])> {
+            let shape = data.shape();
+            let ptr = data.as_mut_raw().as_mut_ptr();
+
+            let end_point = [&(shape.0)];
+            let end_idx = start_idx.iter().skip(1).chain(end_point);
+
+            start_idx
+                .iter()
+                .zip(end_idx)
+                .map(|(&start, &end)| {
+                    (
+                        start..end,
+                        from_raw_parts_mut(
+                            ptr.add(start * shape.1),
+                            shape.1
+                                * end
+                                    .checked_sub(start)
+                                    .expect("Negative slice length is not allowed"),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
         }
     }
 
@@ -533,25 +557,21 @@ mod executor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads = 8;
             let shape = res.shape();
-            let index_range = Self::split_index_range(nthreads, shape.0);
-
-            let res = Arc::new(Mutex::new(res));
+            let start_idx: Vec<usize> = split_index_range(nthreads, 0..shape.0)
+                .map(|r| r.start)
+                .collect();
+            let res_iter = unsafe { Self::split_mut(res, start_idx.as_slice()) };
 
             thread::scope(|s| {
-                for (i0, i1) in index_range {
-                    let res = res.clone();
+                res_iter.for_each(|(r, res)| {
                     s.spawn(move || {
-                        // pre-allocated for better performance
-                        let mut answer = Vec::<Item>::with_capacity((i1 - i0) * shape.1);
-                        Range2D(i0..i1, 0..shape.1).for_each(|idx| answer.push(K::eval(data, idx)));
-
-                        let mut res = res.lock().unwrap();
-                        res[i0 * shape.1..i1 * shape.1 - 1]
-                            .iter_mut()
-                            .zip(answer)
-                            .for_each(|(r, a)| *r = a);
+                        Range2D(r, 0..shape.1)
+                            .zip(res.iter_mut())
+                            .for_each(|(idx, r)| {
+                                *r = K::eval(data, idx);
+                            });
                     });
-                }
+                })
             });
         }
     }
