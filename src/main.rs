@@ -1,8 +1,8 @@
 use crate::{
     bench::{make_thread_pool, run_benchmark},
     executor::{
-        RayonExecutor, RayonScopeExecutor, SerialExecutor, ThreadChannelExecutor,
-        ThreadPoolExecutor, ThreadSharedMutableStateExecutor,
+        RayonExecutor, RayonJoinExecutor, RayonScopeExecutor, SerialExecutor,
+        ThreadChannelExecutor, ThreadPoolExecutor, ThreadSharedMutableStateExecutor,
     },
 };
 
@@ -36,6 +36,16 @@ fn main() {
                 n_threads,
                 make_thread_pool(n_threads)
                     .install(|| run_benchmark(RayonScopeExecutor {}))
+                    .as_millis()
+            );
+        }
+        {
+            println!(
+                "{:<fw1$} {:>3} {:>fw3$}",
+                "RayonJoinExecutor",
+                n_threads,
+                make_thread_pool(n_threads)
+                    .install(|| run_benchmark(RayonJoinExecutor {}))
                     .as_millis()
             );
         }
@@ -119,6 +129,7 @@ mod bench {
             exec.run::<Blur>(&d_in, &mut d_out);
             exec.run::<Blur>(&d_out, &mut d_in);
         }
+        // print_arr_sample(d_in);
         now.elapsed()
     }
 }
@@ -543,6 +554,40 @@ mod executor {
                     });
                 })
             });
+        }
+    }
+
+    /// Parallel executor build upon Rayon's join API
+    pub struct RayonJoinExecutor;
+
+    impl RayonJoinExecutor {
+        fn scatter<K: Kernel>(work: &mut [(Range<usize>, &mut [Item])], data: &Arr2D) {
+            if work.len() > 1 {
+                let (lo, hi) = work.split_at_mut(work.len() / 2);
+                rayon::join(
+                    || Self::scatter::<K>(lo, data),
+                    || Self::scatter::<K>(hi, data),
+                );
+            } else {
+                // do the actual work
+                let (r, res) = &mut work[0];
+                Range2D(r.start..r.end, 0..data.shape().1)
+                    .zip((*res).iter_mut())
+                    .for_each(|(idx, r)| {
+                        *r = K::eval(data, idx);
+                    });
+            }
+        }
+    }
+
+    impl Executor for RayonJoinExecutor {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
+            let shape = res.shape();
+            let start_idx: Vec<usize> = split_index_range(rayon::current_num_threads(), 0..shape.0)
+                .map(|r| r.start)
+                .collect();
+            let mut work_iter = unsafe { split_mut(res, start_idx.as_slice()) };
+            Self::scatter::<K>(work_iter.as_mut_slice(), data);
         }
     }
 

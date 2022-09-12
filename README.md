@@ -34,8 +34,9 @@ By separating the per-location logic and grid iteration logic, it is possible to
 The only required associated function is `run`, which executes the kernel evaluation for all locations.
 There are several exemplary implementations:
 - `SerialExecutor`: Simple serial (single-threaded) executor.
-- `RayonExecutor`: Parallel executor build upon [Rayon's parallel iterator API](https://docs.rs/rayon/latest/rayon/iter/index.html).
-- `RayonScopedExecutor`: Parallel executor build upon [Rayon's scoped threads](https://docs.rs/rayon/latest/rayon/fn.scope.html)
 - `ThreadSharedMutableStateExecutor`: Multi-threaded executor based on [scoped threads of Rust's stdlib](https://doc.rust-lang.org/nightly/std/thread/fn.scope.html). The implementation uses unsafe Rust to avoid the use of `Arc` and `Mutex` for writing to memory shared by the threads.
 - `ThreadChannelExecutor`: Also based on `std::thread::scope` but uses channels to communicate the results back to the main thread which mutates the global result buffer, hence no writing to shared memory. The trade-off are heap memory allocations for the result buffer of each thread. The number of allocations is minimized by handing back the thread result buffer to the threads for reuse. This logic is abstracted away in the `SPMDTask` type.
 - `ThreadPoolExecutor`: Is also based on the `SPMDTask`, i.e. channel based communication and reuse of result buffers, but spawns a single pool of worker threads that are joined when the executor objects is dropped.
+- `RayonExecutor`: Parallel executor build upon [Rayon's parallel iterator API](https://docs.rs/rayon/latest/rayon/iter/index.html).
+- `RayonScopedExecutor`: Parallel executor build upon [Rayon's scoped threads](https://docs.rs/rayon/latest/rayon/fn.scope.html).
+- `RayonJoinExecutor`: Parallel executor using [Rayon's Join API](https://docs.rs/rayon/latest/rayon/fn.join.html).
