@@ -4,6 +4,25 @@ Experimental implementation of kernel based operations (e.g. gaussian blur, deri
 The implementation is experimental and should not be used anywhere! **Only limited testing is done!**.
 The aim of this repo is to learn about the implementation of multi-threaded kernel based methods and their performance.
 
+## Example
+Here is a short example that shows how to run a computational kernel in different run-times
+```rust
+// create input data
+let d_in = data::Arr2D::full(1f64, shape);
+
+// create result buffer
+let mut d_out = data::Arr2D::full(0f64, shape);
+
+// run computation on a single thread
+(executor::SerialExecutor {})
+    .run::<Kernel::Blur>(&d_in, &mut d_out);
+
+// run computation on 8 threads using shared memory write access
+(executor::ThreadSharedMutableStateExecutor {n_threads: 8})
+    .run::<Kernel::Blur>(&d_in, &mut d_out);
+
+```
+
 ## API
 The API is structured in the three main modules `data`, `kernel` and `executor` described below.
 
