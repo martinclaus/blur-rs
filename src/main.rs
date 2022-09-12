@@ -1,5 +1,5 @@
 use crate::{
-    bench::{make_thread_pool, print_arr_sample, run_benchmark},
+    bench::{make_thread_pool, run_benchmark},
     executor::{
         RayonExecutor, RayonScopeExecutor, SerialExecutor, ThreadChannelExecutor,
         ThreadPoolExecutor, ThreadSharedMutableStateExecutor,
@@ -7,38 +7,69 @@ use crate::{
 };
 
 fn main() {
+    let (fw1, fw3) = (35, 5);
+
     // serial execution
-    println!("SerialExecutor");
-    print_arr_sample(run_benchmark(SerialExecutor {}));
+    println!(
+        "{:<fw1$} {:>3} {:>fw3$}",
+        "SerialExecutor",
+        1,
+        run_benchmark(SerialExecutor {}).as_millis()
+    );
 
     // parallel execution
-    {
-        let nthreads = 8;
-        let executor = RayonExecutor {};
-        println!("RayonExecutor ({} threads)", nthreads);
-        print_arr_sample(make_thread_pool(nthreads).install(|| run_benchmark(executor)));
+    for n_threads in [4, 8, 16] {
+        {
+            println!(
+                "{:<fw1$} {:>3} {:>fw3$}",
+                "RayonExecutor",
+                n_threads,
+                make_thread_pool(n_threads)
+                    .install(|| run_benchmark(RayonExecutor {}))
+                    .as_millis()
+            );
+        }
+        {
+            println!(
+                "{:<fw1$} {:>3} {:>fw3$}",
+                "RayonScopeExecutor",
+                n_threads,
+                make_thread_pool(n_threads)
+                    .install(|| run_benchmark(RayonScopeExecutor {}))
+                    .as_millis()
+            );
+        }
+        {
+            println!(
+                "{:<fw1$} {:>3} {:>fw3$}",
+                "ThreadSharedMutableStateExecutor",
+                n_threads,
+                run_benchmark(ThreadSharedMutableStateExecutor { n_threads }).as_millis()
+            );
+        }
+
+        {
+            println!(
+                "{:<fw1$} {:>3} {:>fw3$}",
+                "ThreadChannelExecutor",
+                n_threads,
+                run_benchmark(ThreadChannelExecutor { n_threads }).as_millis()
+            );
+        }
+
+        {
+            println!(
+                "{:<fw1$} {:>3} {:>fw3$}",
+                "ThreadPoolExecutor",
+                n_threads,
+                run_benchmark(ThreadPoolExecutor::new(n_threads)).as_millis()
+            );
+        }
     }
-
-    {
-        let nthreads = 8;
-        //(2..=16).step_by(2) {
-        let executor = RayonScopeExecutor {};
-        println!("RayonScopeExecutor ({} threads)", nthreads);
-        print_arr_sample(make_thread_pool(nthreads).install(|| run_benchmark(executor)));
-    }
-
-    println!("ThreadSharedMutableStateExecutor (8 threads)");
-    print_arr_sample(run_benchmark(ThreadSharedMutableStateExecutor {}));
-
-    println!("ThreadChannelExecutor (8 threads)");
-    print_arr_sample(run_benchmark(ThreadChannelExecutor {}));
-
-    println!("ThreadPoolExecutor (8 threads)");
-    print_arr_sample(run_benchmark(ThreadPoolExecutor::new(8)));
 }
 
 mod bench {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use rayon::ThreadPool;
 
@@ -65,7 +96,7 @@ mod bench {
     }
 
     /// Mockup data and run a kernel on an executor
-    pub fn run_benchmark<E: Executor>(exec: E) -> Arr2D {
+    pub fn run_benchmark<E: Executor>(exec: E) -> Duration {
         // println!("{}", type_name::<E>());
         let shape = Shape2D(1000, 1000);
         let rep = 100;
@@ -88,8 +119,7 @@ mod bench {
             exec.run::<Blur>(&d_in, &mut d_out);
             exec.run::<Blur>(&d_out, &mut d_in);
         }
-        println!("Time elapsed: {}", now.elapsed().as_micros() / 2 / rep);
-        d_in
+        now.elapsed()
     }
 }
 
@@ -539,13 +569,14 @@ mod executor {
     /// Using scoped threads (Rust >= 1.63) to allow for
     /// shared read-only access and Arc + Mutex for shared
     /// mutable access.
-    pub struct ThreadSharedMutableStateExecutor;
+    pub struct ThreadSharedMutableStateExecutor {
+        pub n_threads: usize,
+    }
 
     impl Executor for ThreadSharedMutableStateExecutor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
-            let nthreads = 8;
             let shape = res.shape();
-            let start_idx: Vec<usize> = split_index_range(nthreads, 0..shape.0)
+            let start_idx: Vec<usize> = split_index_range(self.n_threads, 0..shape.0)
                 .map(|r| r.start)
                 .collect();
             let res_iter = unsafe { split_mut(res, start_idx.as_slice()) };
@@ -606,16 +637,17 @@ mod executor {
     /// Uses scoped threads for shared read-only access but sends the results
     /// back to the main thread through a channel. This allows to not use a Mutex
     /// but requires an allocation per sended result.
-    pub struct ThreadChannelExecutor;
+    pub struct ThreadChannelExecutor {
+        pub n_threads: usize,
+    }
 
     impl Executor for ThreadChannelExecutor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
-            let nthreads: usize = 8;
             let shape = res.shape();
 
             thread::scope(|s| {
                 let index_range =
-                    split_index_range((2 * nthreads).checked_sub(1).unwrap(), 0..shape.0);
+                    split_index_range((2 * self.n_threads).checked_sub(1).unwrap(), 0..shape.0);
                 let mut task = SPMDTask::new(
                     |j, buff: Option<(usize, Box<[f64]>)>| {
                         let answer = match buff {
@@ -633,7 +665,7 @@ mod executor {
                         (j, answer)
                     },
                     s,
-                    nthreads,
+                    self.n_threads,
                 );
 
                 task.scatter(index_range);
