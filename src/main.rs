@@ -514,45 +514,6 @@ mod executor {
     /// mutable access.
     pub struct ThreadSharedMutableStateExecutor;
 
-    impl ThreadSharedMutableStateExecutor {
-        /// Build an iterator of ranges over the first dimension of an Arr2D and associated
-        /// mutable references to the respective data.
-        ///
-        /// The function will panic if `start_idx` is not monotonic increasing.
-        ///
-        /// # Safety
-        /// The referenced slices need to be disjunct. Additional safety requirements are
-        /// given by [`std::slice::from_raw_parts`].
-        unsafe fn split_mut<'a>(
-            data: &'a mut Arr2D,
-            start_idx: &[usize],
-        ) -> std::vec::IntoIter<(Range<usize>, &'a mut [Item])> {
-            let shape = data.shape();
-            let ptr = data.as_mut_raw().as_mut_ptr();
-
-            let end_point = [&(shape.0)];
-            let end_idx = start_idx.iter().skip(1).chain(end_point);
-
-            start_idx
-                .iter()
-                .zip(end_idx)
-                .map(|(&start, &end)| {
-                    (
-                        start..end,
-                        from_raw_parts_mut(
-                            ptr.add(start * shape.1),
-                            shape.1
-                                * end
-                                    .checked_sub(start)
-                                    .expect("Negative slice length is not allowed"),
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-        }
-    }
-
     impl Executor for ThreadSharedMutableStateExecutor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let nthreads = 8;
@@ -560,7 +521,7 @@ mod executor {
             let start_idx: Vec<usize> = split_index_range(nthreads, 0..shape.0)
                 .map(|r| r.start)
                 .collect();
-            let res_iter = unsafe { Self::split_mut(res, start_idx.as_slice()) };
+            let res_iter = unsafe { split_mut(res, start_idx.as_slice()) };
 
             thread::scope(|s| {
                 res_iter.for_each(|(r, res)| {
@@ -574,6 +535,43 @@ mod executor {
                 })
             });
         }
+    }
+
+    /// Build an iterator of ranges over the first dimension of an Arr2D and associated
+    /// mutable references to the respective data.
+    ///
+    /// The function will panic if `start_idx` is not monotonic increasing.
+    ///
+    /// # Safety
+    /// The referenced slices need to be disjunct. Additional safety requirements are
+    /// given by [`std::slice::from_raw_parts`].
+    unsafe fn split_mut<'a>(
+        data: &'a mut Arr2D,
+        start_idx: &[usize],
+    ) -> std::vec::IntoIter<(Range<usize>, &'a mut [Item])> {
+        let shape = data.shape();
+        let ptr = data.as_mut_raw().as_mut_ptr();
+
+        let end_point = [&(shape.0)];
+        let end_idx = start_idx.iter().skip(1).chain(end_point);
+
+        start_idx
+            .iter()
+            .zip(end_idx)
+            .map(|(&start, &end)| {
+                (
+                    start..end,
+                    from_raw_parts_mut(
+                        ptr.add(start * shape.1),
+                        shape.1
+                            * end
+                                .checked_sub(start)
+                                .expect("Negative slice length is not allowed"),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// Multi-threaded Executor based on std:thread and std::sync::mpsc
