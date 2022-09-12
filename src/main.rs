@@ -208,11 +208,15 @@ mod data_type {
             self.shape
         }
 
-        pub(crate) fn as_raw(&self) -> &Box<[f64]> {
+        /// Return a slice view of the underlying memory
+        #[inline]
+        pub(crate) fn as_slice(&self) -> &[f64] {
             &self.data
         }
 
-        pub(crate) fn as_mut_raw(&mut self) -> &mut Box<[f64]> {
+        /// Return a mutable slice view of the underlying memory
+        #[inline]
+        pub(crate) fn as_mut_slice(&mut self) -> &mut [f64] {
             &mut self.data
         }
 
@@ -228,20 +232,6 @@ mod data_type {
         #[inline]
         pub fn iter_mut(&mut self) -> IterMut<Item> {
             self.data.iter_mut()
-        }
-
-        /// Return a Rayon parallel iterator.
-        #[inline]
-        // FIXME: make this a feature
-        pub fn par_iter(&self) -> rayon::slice::Iter<Item> {
-            self.data.par_iter()
-        }
-
-        /// Return a Rayon parallel iterator over mutable references to all elements.
-        #[inline]
-        // FIXME: make this a feature
-        pub fn par_iter_mut(&mut self) -> rayon::slice::IterMut<Item> {
-            self.data.par_iter_mut()
         }
     }
 
@@ -469,7 +459,7 @@ mod executor {
     }
 
     // FIXME: make this a feature
-    /// Parallel executor build upon rayon library.
+    /// Parallel executor build upon rayon's parallel iterator API.
     ///
     /// It relies on the implementation of the ParallelIterator trait
     /// of the underlying data structures.
@@ -479,11 +469,22 @@ mod executor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
             // FIXME: use parallel iterator for index
-            res.par_iter_mut().enumerate().for_each(|(i, out)| {
-                *out = K::eval(data, shape.usize_into_index(i));
-            });
+            res.as_mut_slice()
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, out)| {
+                    *out = K::eval(data, shape.usize_into_index(i));
+                });
         }
     }
+
+    // struct RayonScopeExecutor;
+
+    // impl Executor for RayonScopeExecutor {
+    //     fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
+    //     todo!()
+    // }
+    // }
 
     /// Returns an iterator of `n_chunks` evenly long sub-ranges
     fn split_index_range(n_chunks: usize, range: Range<usize>) -> std::vec::IntoIter<Range<usize>> {
@@ -550,7 +551,7 @@ mod executor {
         start_idx: &[usize],
     ) -> std::vec::IntoIter<(Range<usize>, &'a mut [Item])> {
         let shape = data.shape();
-        let ptr = data.as_mut_raw().as_mut_ptr();
+        let ptr = data.as_mut_slice().as_mut_ptr();
 
         let end_point = [&(shape.0)];
         let end_idx = start_idx.iter().skip(1).chain(end_point);
