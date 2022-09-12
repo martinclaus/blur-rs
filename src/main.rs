@@ -74,7 +74,7 @@ mod bench {
     use rayon::ThreadPool;
 
     use crate::{
-        data_type::{Arr2D, Shape2D},
+        data::{Arr2D, Shape2D},
         executor::Executor,
         kernel::Blur,
     };
@@ -123,7 +123,7 @@ mod bench {
     }
 }
 
-mod data_type {
+mod data {
     use std::iter::IntoIterator;
     use std::ops::{Index, IndexMut, Range};
     use std::slice::{Iter, IterMut};
@@ -370,7 +370,7 @@ mod data_type {
 }
 
 mod kernel {
-    use crate::data_type::{Arr2D, Item, Ix2, Shape2D};
+    use crate::data::{Arr2D, Item, Ix2, Shape2D};
 
     /// Trait for kernel operations.
     pub trait Kernel {
@@ -387,7 +387,7 @@ mod kernel {
         /// # Examples
         /// `Blur` is a centered 3x3 kernel.
         ///
-        /// ```
+        /// ```rust
         /// assert_eq!(Blur::map_index([0, 0], [4, 5]), [3, 4]);
         /// assert_eq!(Blur::map_index([2, 1], [4, 5]), [5, 5]);
         /// ```
@@ -475,7 +475,7 @@ mod executor {
     use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
     use std::thread::{self, JoinHandle, Scope};
 
-    use crate::data_type::{Arr2D, Item, Range2D};
+    use crate::data::{Arr2D, Item, Range2D};
     use crate::kernel::Kernel;
     use rayon::prelude::*;
 
