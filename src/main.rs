@@ -1,7 +1,7 @@
 use crate::{
     bench::{make_thread_pool, run_benchmark},
     executor::{
-        RayonExecutor, RayonJoinExecutor, RayonScopeExecutor, SerialExecutor,
+        RayonIteratorExecutor, RayonJoinExecutor, RayonScopeExecutor, SerialExecutor,
         ThreadChannelExecutor, ThreadPoolExecutor, ThreadSharedMutableStateExecutor,
     },
 };
@@ -22,10 +22,10 @@ fn main() {
         {
             println!(
                 "{:<fw1$} {:>3} {:>fw3$}",
-                "RayonExecutor",
+                "RayonIteratorExecutor",
                 n_threads,
                 make_thread_pool(n_threads)
-                    .install(|| run_benchmark(RayonExecutor {}))
+                    .install(|| run_benchmark(RayonIteratorExecutor {}))
                     .as_millis()
             );
         }
@@ -515,9 +515,9 @@ mod executor {
     /// It relies on the implementation of the ParallelIterator trait
     /// of the underlying data structures.
     #[derive(Copy, Clone, Debug)]
-    pub struct RayonExecutor;
+    pub struct RayonIteratorExecutor;
 
-    impl Executor for RayonExecutor {
+    impl Executor for RayonIteratorExecutor {
         fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
             let shape = res.shape();
             // FIXME: use parallel iterator for index
