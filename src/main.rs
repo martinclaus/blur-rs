@@ -134,11 +134,10 @@ mod data_type {
     pub type Item = f64;
     type Range1D = Range<usize>;
 
-    #[derive(Clone, Debug)]
-
     /// Two-dimensional range of of indices.
     ///
     /// This objects offers an iterator over indices.
+    #[derive(Clone, Debug)]
     pub struct Range2D(pub Range1D, pub Range1D);
 
     impl Range2D {
@@ -225,6 +224,7 @@ mod data_type {
     }
 
     /// 2D Array of a fixed shape
+    #[derive(Debug)]
     pub struct Arr2D {
         shape: Shape2D,
         // box slice because of stack size limitations
@@ -394,6 +394,7 @@ mod kernel {
         fn map_index(k_idx: Ix2, d_idx: Ix2) -> Ix2;
     }
 
+    #[derive(Copy, Clone, Debug)]
     pub struct Blur;
 
     impl Blur {
@@ -485,6 +486,7 @@ mod executor {
     }
 
     /// Simple serial (single-threaded) executor.
+    #[derive(Copy, Clone, Debug)]
     pub struct SerialExecutor;
 
     impl Executor for SerialExecutor {
@@ -501,6 +503,7 @@ mod executor {
     ///
     /// It relies on the implementation of the ParallelIterator trait
     /// of the underlying data structures.
+    #[derive(Copy, Clone, Debug)]
     pub struct RayonExecutor;
 
     impl Executor for RayonExecutor {
@@ -517,6 +520,7 @@ mod executor {
     }
 
     /// Parallel executor build upon Rayon's scoped threads
+    #[derive(Copy, Clone, Debug)]
     pub struct RayonScopeExecutor;
 
     impl Executor for RayonScopeExecutor {
@@ -569,6 +573,7 @@ mod executor {
     /// Using scoped threads (Rust >= 1.63) to allow for
     /// shared read-only access and Arc + Mutex for shared
     /// mutable access.
+    #[derive(Copy, Clone, Debug)]
     pub struct ThreadSharedMutableStateExecutor {
         pub n_threads: usize,
     }
@@ -637,6 +642,7 @@ mod executor {
     /// Uses scoped threads for shared read-only access but sends the results
     /// back to the main thread through a channel. This allows to not use a Mutex
     /// but requires an allocation per sended result.
+    #[derive(Copy, Clone, Debug)]
     pub struct ThreadChannelExecutor {
         pub n_threads: usize,
     }
@@ -684,6 +690,7 @@ mod executor {
     /// WIP Multi-threaded executor based on std::thread using a fixed pool of worker threads.
     ///
     /// See limitations of `ThreadPool` on why it is not fully usable yet.
+    #[derive(Debug)]
     pub struct ThreadPoolExecutor {
         tp: ThreadPool,
     }
@@ -784,6 +791,7 @@ mod executor {
     ///        .expect("Should have send task")
     /// })
     /// ```
+    #[derive(Debug)]
     struct ThreadPool {
         handle: Vec<JoinHandle<()>>,
         task_sender: Vec<SyncSender<ThreadTask>>,
@@ -907,6 +915,7 @@ mod executor {
     ///
     /// assert!(res.into_iter().zip(1..11).all(|(i1, i2)| i1 == i2));
     /// ```
+    #[derive(Debug)]
     struct SPMDTask<R, WI> {
         work: Vec<Sender<WI>>,
         result: Receiver<(R, Sender<R>)>,
