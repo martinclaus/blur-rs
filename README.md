@@ -30,7 +30,7 @@ An example implementation is given with `Blur` for a `3x3` gaussian blur kernel.
 ### executor
 The module defines the `Executor` trait which defines the interface for kernel executor types.
 An executor evaluates a kernel operation at all locations of the resulting `Arr2D`.
-By separating the per-location logic and grid iteration logic, it is possible to separate the concerns of evaluation (the kernel) and organization (the executor).
+By separating the per-location logic and grid iteration logic, it is possible to separate the concerns of evaluation (the kernel) and execution run-time (the executor).
 The only required associated function is `run`, which executes the kernel evaluation for all locations.
 There are several exemplary implementations:
 - `SerialExecutor`: Simple serial (single-threaded) executor.
