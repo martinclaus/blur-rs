@@ -1,8 +1,8 @@
 use crate::{
     bench::{make_thread_pool, print_arr_sample, run_benchmark},
     executor::{
-        RayonExecutor, SerialExecutor, ThreadChannelExecutor, ThreadPoolExecutor,
-        ThreadSharedMutableStateExecutor,
+        RayonExecutor, RayonScopeExecutor, SerialExecutor, ThreadChannelExecutor,
+        ThreadPoolExecutor, ThreadSharedMutableStateExecutor,
     },
 };
 
@@ -12,10 +12,18 @@ fn main() {
     print_arr_sample(run_benchmark(SerialExecutor {}));
 
     // parallel execution
-    for nthreads in [2, 4, 8, 16] {
-        //(2..=16).step_by(2) {
+    {
+        let nthreads = 8;
         let executor = RayonExecutor {};
         println!("RayonExecutor ({} threads)", nthreads);
+        print_arr_sample(make_thread_pool(nthreads).install(|| run_benchmark(executor)));
+    }
+
+    {
+        let nthreads = 8;
+        //(2..=16).step_by(2) {
+        let executor = RayonScopeExecutor {};
+        println!("RayonScopeExecutor ({} threads)", nthreads);
         print_arr_sample(make_thread_pool(nthreads).install(|| run_benchmark(executor)));
     }
 
@@ -172,8 +180,8 @@ mod data_type {
             [i / self.1, i % self.1]
         }
 
-        pub fn par_iter(&self) -> rayon::vec::IntoIter<Ix2> {
-            Range2D::from(*self).par_iter()
+        pub fn par_iter(self) -> rayon::vec::IntoIter<Ix2> {
+            Range2D::from(self).par_iter()
         }
     }
 
@@ -478,13 +486,31 @@ mod executor {
         }
     }
 
-    // struct RayonScopeExecutor;
+    /// Parallel executor build upon Rayon's scoped threads
+    pub struct RayonScopeExecutor;
 
-    // impl Executor for RayonScopeExecutor {
-    //     fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
-    //     todo!()
-    // }
-    // }
+    impl Executor for RayonScopeExecutor {
+        fn run<K: Kernel>(&self, data: &Arr2D, res: &mut Arr2D) {
+            let nthreads = rayon::current_num_threads();
+            let shape = res.shape();
+            let start_idx: Vec<usize> = split_index_range(nthreads, 0..shape.0)
+                .map(|r| r.start)
+                .collect();
+            let res_iter = unsafe { split_mut(res, start_idx.as_slice()) };
+
+            rayon::scope(|s| {
+                res_iter.for_each(|(r, res)| {
+                    s.spawn(move |_| {
+                        Range2D(r, 0..shape.1)
+                            .zip(res.iter_mut())
+                            .for_each(|(idx, r)| {
+                                *r = K::eval(data, idx);
+                            });
+                    });
+                })
+            });
+        }
+    }
 
     /// Returns an iterator of `n_chunks` evenly long sub-ranges
     fn split_index_range(n_chunks: usize, range: Range<usize>) -> std::vec::IntoIter<Range<usize>> {
