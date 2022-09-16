@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 rayon = "1.5"
+
+[profile.release]
+debug = true
